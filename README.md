@@ -45,6 +45,7 @@ Optional (manual install, only for bulk reverse DNS — see [Reverse DNS (Stage 
 ## Installation
 
 ```bash
+sudo apt update && sudo apt install python3 python3-pip nmap
 git clone <repo-url> auto-scout
 cd auto-scout
 ./setup.sh
