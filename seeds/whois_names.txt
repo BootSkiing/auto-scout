@@ -1,0 +1,3 @@
+# Registrant names for reverse WHOIS lookups. One entry per line.
+John Smith
+Jane Doe

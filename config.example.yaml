@@ -1,0 +1,125 @@
+## Auto-Scout - External Asset Enumeration Pipeline
+## Central configuration file
+
+api_keys:
+  whoxy: ""
+  # bbot module keys (optional, improve subdomain coverage)
+  shodan: ""
+  censys_id: ""
+  censys_secret: ""
+  securitytrails: ""
+  virustotal: ""
+  github: ""
+  chaos: ""
+
+seeds:
+  corporations: "seeds/corporations.txt"
+  domains: "seeds/domains.txt"
+  whois_names: "seeds/whois_names.txt"
+  whois_orgs: "seeds/whois_orgs.txt"
+  whois_emails: "seeds/whois_emails.txt"
+  out_of_scope_domains: "seeds/out_of_scope_domains.txt"
+  out_of_scope_terms: "seeds/out_of_scope_terms.txt"
+  out_of_scope_asns: "seeds/out_of_scope_asns.txt"
+
+asn_discovery:
+  cache_dir: ".cache/asndb"
+  cache_max_age_hours: 24
+  asn_json_url: "https://asndb.network/get/latest/asn.json"
+  ip_dat_url: "https://asndb.network/get/latest/ip.dat"
+
+reverse_dns:
+  base_url: "https://ip.thc.org"
+  page_size: 100
+  request_delay_seconds: 2.0   # matches THC's 0.5 req/s refill (1 per 2s)
+  progress_save_interval: 50
+  max_retries_on_429: 6         # per-IP retries with exponential backoff on 429
+  max_consecutive_failures: 5   # abort+save after this many IPs fail in a row
+  bulk:
+    # Offline alternative to the per-IP API: query THC's monthly bulk parquet
+    # snapshot locally with DuckDB. See stages/s3_rdns_bulk.py.
+    duckdb_bin: "duckdb"          # path to the duckdb CLI binary
+    parquet_path: ""              # path to the DECOMPRESSED rdns-*.parquet
+    ip_column: ""                 # auto-detected when empty
+    domain_column: ""             # auto-detected when empty
+    max_expanded_ips: 20000000    # safety cap on the target-IP set
+    query_timeout_seconds: 7200   # DuckDB scan can take a while on 79GB
+
+reverse_whois:
+  whoxy_base_url: "https://api.whoxy.com"
+  mode: "micro"
+  request_delay_seconds: 1.0
+
+cleanup:
+  parking_indicators:
+    - "parked free"
+    - "godaddy"
+    - "this domain is for sale"
+    - "hugedomains"
+    - "sedoparking"
+    - "parkingcrew"
+    - "buy this domain"
+    - "domain parking"
+    - "this webpage is parked"
+    - "sedo.com"
+  excluded_domain_patterns:
+    - '\.akamai\.net$'
+    - '\.akamaiedge\.net$'
+    - '\.akamaitechnologies\.com$'
+    - '\.cloudfront\.net$'
+    - '\.amazonaws\.com$'
+    - '\.azure-dns\.com$'
+    - '\.azurewebsites\.net$'
+    - '\.trafficmanager\.net$'
+    - '\.googleusercontent\.com$'
+  parking_check_timeout: 5
+  parking_check_threads: 20
+
+subdomain_enum:
+  bbot_flags:
+    - "subdomain-enum"
+  bbot_exclude_flags: []
+  bbot_exclude_modules: []
+  batch_size: 20
+  timeout_minutes: 120
+
+port_scan:
+  masscan_rate: 10000
+  masscan_top_ports: 100
+  nmap_top_ports: 1000
+  nmap_supplemental_ports: []
+  nmap_options: "-sV --open --version-intensity 2 --min-rate 1000"
+  nmap_timing: "-T4"
+  nmap_max_parallelism: 50
+
+web_analysis:
+  # Fallback ports: only used when nmap couldn't fingerprint the service.
+  # If nmap identifies a service as http/https, it's screenshotted regardless of port.
+  http_fallback_ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+    - 8000
+    - 8888
+    - 9443
+  gowitness_threads: 10
+  gowitness_timeout: 15
+
+extras:
+  dns_security: true
+  google_dorks: true
+  dkim_selectors:
+    - "google"
+    - "default"
+    - "selector1"
+    - "selector2"
+    - "k1"
+    - "mail"
+    - "dkim"
+
+review:
+  mode: "halt"
+
+output:
+  base_dir: "runs"

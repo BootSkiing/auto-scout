@@ -1,0 +1,5 @@
+# Corporation names to search for ASNs. One entry per line.
+# Lines starting with # are ignored. Include legal-name variants.
+Acme Corporation
+Acme Holdings LLC
+Acme International

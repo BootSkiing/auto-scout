@@ -1,0 +1,4 @@
+# Known root domains for the target. One entry per line.
+acme.com
+acmecorp.net
+acme-holdings.com

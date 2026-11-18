@@ -1,0 +1,3 @@
+# ASNs to exclude from discovery, one per line (e.g. shared-hosting ASNs).
+# AS14618
+# AS16509

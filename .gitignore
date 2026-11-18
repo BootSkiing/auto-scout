@@ -1,0 +1,29 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Virtualenvs ---
+auto-scout-venv/
+venv/
+.venv/
+env/
+
+# --- Local config with real API keys (copy config.example.yaml -> config.yaml) ---
+config.yaml
+
+# --- Caches ---
+.cache/
+
+# --- Run output (scan results, screenshots, host data) ---
+# Keep the directory, ignore its contents.
+runs/*
+!runs/.gitkeep
+
+# --- Editor / OS / tooling ---
+.claude/settings.local.json
+.idea/
+.vscode/
+*.swp
+.DS_Store

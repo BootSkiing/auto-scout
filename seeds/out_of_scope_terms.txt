@@ -1,0 +1,3 @@
+# Substrings that mark a discovered domain as out of scope. One per line.
+staging
+internal-test

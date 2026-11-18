@@ -1,0 +1,4 @@
+# Regex patterns for domains to always exclude (applied in stages 3, 4, 5).
+# One pattern per line. Lines starting with # are ignored.
+\.example\.com$
+retired-brand\.com$
