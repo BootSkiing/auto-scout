@@ -181,15 +181,42 @@ reverse_dns:
 
 One-time setup:
 
-1. **Get the snapshot.** THC publishes it gzipped on Hugging Face (`rdns-<month>.parquet.gz`, ~51GB compressed / ~79GB uncompressed). DuckDB can't read a gzipped parquet, so decompress it first (needs ~130GB free during decompression):
-   ```bash
-   gunzip rdns-oct.parquet.gz        # -> rdns-oct.parquet
-   ```
-2. **Install the DuckDB CLI:**
-   ```bash
-   curl https://install.duckdb.org | sh
-   ```
-3. **Point config at the file** via `reverse_dns.bulk.parquet_path`, or pass `--parquet` when running the stage standalone.
+**1. Install the DuckDB CLI.** Not blocked by the proxy (unlike PyPI):
+
+```bash
+curl https://install.duckdb.org | sh
+```
+
+The installer drops the binary at `~/.duckdb/cli/latest/duckdb` and prints a line to add it to your `PATH`. Either add it, or set `reverse_dns.bulk.duckdb_bin` to that full path. Verify:
+
+```bash
+duckdb --version
+```
+
+**2. Download the monthly snapshot.** THC publishes the full dataset (~6.5B records) at the end of each month on Hugging Face as `rdns-<month>.parquet.gz` (~51GB compressed / ~79GB uncompressed). Copy the current month's Parquet link from the [bulk data access page](https://ip.thc.org/docs/bulk-data-access) — the URL path encodes the *release* month while the filename encodes the *data* month, so don't assume it. For the October 2026 snapshot (released Nov 2026):
+
+```bash
+curl -L -C - -o rdns-oct.parquet.gz \
+  'https://huggingface.co/buckets/IP-THC-ORG/Datasets/resolve/2026/11/rdns-oct.parquet.gz?download=true'
+```
+
+`-C -` resumes a partial download if the transfer drops — useful on a 51GB file.
+
+> **Heads up:** Hugging Face is blocked by the corporate Zscaler policy, so run this download off-network and copy the `.gz` onto the host.
+
+**3. Decompress it.** DuckDB can't read a gzipped parquet, so unzip first (see the disk-space note above — budget ~130GB free while both files exist):
+
+```bash
+gunzip rdns-oct.parquet.gz        # -> rdns-oct.parquet (~79GB); removes the .gz on success
+```
+
+**4. Point config at the file** via `reverse_dns.bulk.parquet_path`, or pass `--parquet` when running the stage standalone. The `ip`/`domain` columns are auto-detected from the parquet schema (override with `reverse_dns.bulk.ip_column` / `domain_column` if detection fails):
+
+```yaml
+reverse_dns:
+  bulk:
+    parquet_path: "/path/to/rdns-oct.parquet"
+```
 
 Then run the pipeline with `./run.sh --rdns-mode bulk`.
 
