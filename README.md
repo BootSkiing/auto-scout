@@ -17,9 +17,6 @@
               A U T O - S C O U T
 ```
 
-> An AI-controlled scout for your external attack surface — named after the
-> Auto-Scout drone from [FTL: Faster Than Light](https://subsetgames.com/ftl.html).
-
 An automated external asset enumeration pipeline for authorized security assessments. The pipeline discovers internet-facing assets through ASN lookups, reverse DNS, reverse WHOIS, and subdomain enumeration, and performs follow-up recon via port scanning and web screenshotting.
 
 Each stage reads input files, produces output files, and can be run independently. Human review gates pause the pipeline at key checkpoints so you can approve or trim results before proceeding.
@@ -33,11 +30,11 @@ fingerprinting, and web probing that contacts hosts directly. Obviously get perm
 
 - Python 3.10+
 - [nmap](https://nmap.org/)
-- [bbot](https://github.com/blacklanternsecurity/bbot) (v3.x)
 - `dig`, `curl`, `jq` (standard Linux utilities)
 
 Optional (installed by `setup.sh`):
 
+- [bbot](https://github.com/blacklanternsecurity/bbot) (v3.x)
 - [masscan](https://github.com/robertdavidgraham/masscan) — fast alive-host discovery (falls back to nmap if missing)
 - [gowitness](https://github.com/sensepost/gowitness) (v3.x) — web screenshotting
 
