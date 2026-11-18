@@ -46,7 +46,7 @@ Optional (manual install, only for bulk reverse DNS — see [Reverse DNS (Stage 
 ## Installation
 
 ```bash
-sudo apt update && sudo apt install python3 python3-pip python3-venv pipx nmap
+sudo apt update && sudo apt install python3 python3-pip python3-venv pipx nmap masscan chromium-browser
 git clone https://github.com/BootSkiing/auto-scout && cd auto-scout
 python3 -m venv . && source bin/activate
 ./setup.sh
