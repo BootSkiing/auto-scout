@@ -28,7 +28,8 @@ fingerprinting, and web probing that contacts hosts directly. Obviously get perm
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10+ (w/ pip and venv)
+- [pipx](https://pipx.pypa.io/stable/)
 - [nmap](https://nmap.org/)
 - `dig`, `curl`, `jq` (standard Linux utilities)
 
@@ -45,8 +46,9 @@ Optional (manual install, only for bulk reverse DNS — see [Reverse DNS (Stage 
 ## Installation
 
 ```bash
-git clone <repo-url> auto-scout
-cd auto-scout
+sudo apt update && sudo apt install python3 python3-pip python3-venv pipx nmap
+git clone https://github.com/BootSkiing/auto-scout && cd auto-scout
+python3 -m venv . && source bin/activate
 ./setup.sh
 cp config.example.yaml config.yaml   # then add your API keys
 ```
