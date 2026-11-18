@@ -41,6 +41,10 @@ Optional (installed by `setup.sh`):
 - [masscan](https://github.com/robertdavidgraham/masscan) — fast alive-host discovery (falls back to nmap if missing)
 - [gowitness](https://github.com/sensepost/gowitness) (v3.x) — web screenshotting
 
+Optional (manual install, only for bulk reverse DNS — see [Reverse DNS (Stage 3)](#reverse-dns-stage-3)):
+
+- [DuckDB CLI](https://duckdb.org/) — queries THC's monthly bulk rDNS snapshot offline instead of the per-IP API (`curl https://install.duckdb.org | sh`)
+
 ## Installation
 
 ```bash
@@ -131,16 +135,54 @@ These are applied automatically during stage 5 (cleanup). Domains matching `excl
 
 Additional exclusions live in the `seeds/out_of_scope_*.txt` files (see [Seed Files](#seed-files)). `out_of_scope_domains.txt` holds regex patterns applied during cleanup.
 
-### Reverse DNS Rate Limiting
+### Reverse DNS (Stage 3)
+
+Stage 3 has two interchangeable backends, selected with `--rdns-mode` (default `api`). Both write the same `domains_review.txt` / `rdns_raw.json` outputs, so downstream stages don't care which you used.
+
+#### API mode (default)
 
 ```yaml
 reverse_dns:
   base_url: "https://ip.thc.org"
-  request_delay_seconds: 2.0       # Seconds between requests
+  page_size: 100
+  request_delay_seconds: 2.0       # Seconds between requests (THC refills 0.5 req/s)
   progress_save_interval: 50       # Save checkpoint every N IPs
+  max_retries_on_429: 6            # Per-IP retries with exponential backoff on HTTP 429
+  max_consecutive_failures: 5      # Abort and save if this many IPs fail in a row
 ```
 
-The ip.thc.org API has a rate limit of 250 requests, replenishing at 0.5/sec. The default 2-second delay stays well within limits. For large IP ranges, the stage saves progress checkpoints so it can resume if interrupted.
+Queries the ip.thc.org API one IP at a time. The API rate limit is 250 requests, replenishing at 0.5/sec, so the default 2-second delay stays well within limits. A full scan of a large range can take many hours; the stage saves progress checkpoints so it can resume if interrupted.
+
+#### Bulk mode (`--rdns-mode bulk`)
+
+For large scopes, query THC's monthly bulk snapshot locally with DuckDB instead of the API — no rate limit, minutes-to-hours instead of ~a day — at the cost of freshness (the snapshot is monthly, not live). Coverage matches the API scan: it expands the same stage-2 CIDRs to the same target IPs.
+
+> **Disk space:** the snapshot is large. Budget roughly **~51GB** for the compressed download, **~79GB** for the decompressed parquet, and **~130GB free** during decompression (both files exist at once). You can delete the `.gz` once `gunzip` finishes to reclaim the compressed copy. The decompressed `~79GB` parquet must remain on disk for every run that uses bulk mode.
+
+```yaml
+reverse_dns:
+  bulk:
+    duckdb_bin: "duckdb"           # Path to the DuckDB CLI binary
+    parquet_path: ""               # Path to the DECOMPRESSED rdns-*.parquet
+    ip_column: ""                  # Auto-detected from the parquet schema when empty
+    domain_column: ""              # Auto-detected when empty
+    max_expanded_ips: 20000000     # Safety cap on the expanded target-IP set
+    query_timeout_seconds: 7200    # DuckDB scan can take a while on a ~79GB file
+```
+
+One-time setup:
+
+1. **Get the snapshot.** THC publishes it gzipped on Hugging Face (`rdns-<month>.parquet.gz`, ~51GB compressed / ~79GB uncompressed). DuckDB can't read a gzipped parquet, so decompress it first (needs ~130GB free during decompression):
+   ```bash
+   gunzip rdns-oct.parquet.gz        # -> rdns-oct.parquet
+   ```
+2. **Install the DuckDB CLI:**
+   ```bash
+   curl https://install.duckdb.org | sh
+   ```
+3. **Point config at the file** via `reverse_dns.bulk.parquet_path`, or pass `--parquet` when running the stage standalone.
+
+Then run the pipeline with `./run.sh --rdns-mode bulk`.
 
 ## Seed Files
 
@@ -258,6 +300,16 @@ Completed stages are skipped. If a stage was waiting for review and the approved
 
 All review gates are auto-approved. Useful once you've validated your seeds and exclusion patterns.
 
+### Reverse DNS: API vs Bulk
+
+Stage 3 defaults to the per-IP ip.thc.org API. For large IP ranges, use the offline bulk backend instead (requires DuckDB and THC's monthly parquet snapshot — see [Reverse DNS (Stage 3)](#reverse-dns-stage-3) for setup):
+
+```bash
+./run.sh --rdns-mode bulk
+```
+
+`--rdns-mode api` (default) uses the live API; `--rdns-mode bulk` queries the local snapshot. Both feed the same review gate and downstream stages.
+
 ### CLI Reference
 
 ```
@@ -270,11 +322,13 @@ Options:
   --only STAGE           Run only this stage
   --through STAGE        Run stages 1 through this stage
   --review-mode MODE     "halt" (default) or "auto"
+  --rdns-mode MODE       Stage 3 backend: "api" (default, per-IP ip.thc.org)
+                         or "bulk" (local DuckDB query over THC's snapshot)
 
 Stage names:
   s1_seeds        Validate and snapshot seed files
   s2_asn          ASN discovery via asndb.network
-  s3_rdns         Reverse DNS via ip.thc.org
+  s3_rdns         Reverse DNS via ip.thc.org API or bulk snapshot
   s4_rwhois       Reverse WHOIS via Whoxy API
   s5_cleanup      Merge, deduplicate, parking detection
   s6_subdomains   Passive subdomain enumeration (bbot)
@@ -300,6 +354,8 @@ Downloads the [asndb.network](https://asndb.network/) ASN-to-organization and IP
 ### Stage 3: Reverse DNS (`s3_rdns`)
 
 Queries ip.thc.org for each IP in the ranges from stage 2 to find hosted domains. Supports resuming from checkpoints for large IP ranges.
+
+Two backends are available via `--rdns-mode` (see [Reverse DNS (Stage 3)](#reverse-dns-stage-3)): `api` (default) hits the per-IP ip.thc.org API; `bulk` queries THC's monthly bulk snapshot locally with DuckDB, which avoids the API rate limit for large scopes. Both produce identical outputs.
 
 **Review gate** — Produces `domains_review.txt` with all discovered domains (pre-filtered against exclusion patterns). Remove out-of-scope domains and save as `domains_approved.txt`.
 
