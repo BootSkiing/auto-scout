@@ -14,12 +14,33 @@ echo "  Done."
 
 # bbot (installed in isolation -- it is used as a CLI, not imported)
 echo "[*] Checking bbot..."
+
+# Add pipx's bin dir to PATH for the rest of this script so a freshly
+# installed bbot is found by the validation step below, even though the
+# user's login shell won't pick it up until they restart it (or source
+# their shell rc). `pipx ensurepath` only edits the shell rc; it does not
+# affect the current process.
+pipx_bin_dir=""
+if command -v pipx &>/dev/null; then
+    pipx_bin_dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+fi
+[ -z "$pipx_bin_dir" ] && pipx_bin_dir="${HOME}/.local/bin"
+case ":${PATH}:" in
+    *":${pipx_bin_dir}:"*) ;;
+    *) export PATH="${pipx_bin_dir}:${PATH}" ;;
+esac
+
 if command -v bbot &>/dev/null; then
     echo "  bbot already installed: $(bbot --version 2>&1 | head -1)"
 elif command -v pipx &>/dev/null; then
     echo "  Installing bbot with pipx (isolated environment)..."
     if pipx install bbot; then
-        echo "  Installed bbot. Ensure pipx's bin dir is on your PATH (run: pipx ensurepath)."
+        # Persist pipx's bin dir onto the user's PATH for future shells.
+        pipx ensurepath >/dev/null 2>&1 || true
+        echo "  Installed bbot to ${pipx_bin_dir}."
+        echo "  NOTE: this dir may not be on your PATH yet. 'pipx ensurepath' has"
+        echo "        added it to your shell profile, but you must open a NEW shell"
+        echo "        (or run: source ~/.bashrc) before 'bbot' resolves in your terminal."
     else
         echo "  pipx install failed. Install manually: pipx install bbot"
     fi
@@ -28,6 +49,7 @@ else
     echo "  Install pipx, then bbot:"
     echo "    python3 -m pip install --user pipx && python3 -m pipx ensurepath"
     echo "    pipx install bbot"
+    echo "  Then open a new shell (or 'source ~/.bashrc') so bbot is on your PATH."
     echo "  (Or, if you prefer: python3 -m pip install --user bbot -- may conflict"
     echo "   with this project's pinned dependencies.)"
 fi

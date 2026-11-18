@@ -63,6 +63,16 @@ instructions. masscan and gowitness are optional — the pipeline degrades
 gracefully without them. bbot is required for stage 6; if `pipx` is not present,
 the script tells you how to install both.
 
+> **bbot / PATH note.** `pipx install bbot` places the `bbot` binary in pipx's
+> bin directory (usually `~/.local/bin`), which is **not** on a fresh Ubuntu
+> system's `PATH`. `setup.sh` runs `pipx ensurepath` for you, but that only
+> edits your shell profile — it does not change your *current* shell. After
+> setup, **open a new shell** (or run `source ~/.bashrc`) so that `bbot`
+> resolves in your terminal. As a safety net, `run.sh` also prepends pipx's
+> bin directory to `PATH`, so the pipeline finds `bbot` even if you haven't
+> restarted your shell. If you invoke `orchestrator.py` directly (instead of
+> via `run.sh`), make sure `~/.local/bin` is on your `PATH` yourself.
+
 ## Configuration
 
 Configuration lives in `config.yaml`; it holds your API keys. Copy the provided template and edit your copy:
