@@ -93,10 +93,14 @@ subdomain_enum:
   bbot_flags:
     - "subdomain-enum"
   bbot_exclude_flags: []
-  # Modules listed here are always excluded. certspotter is additionally
-  # auto-excluded unless api_keys.sslmate is set (see above), so you don't need
-  # to list it here.
+  # Modules listed here are always excluded. Two slow/rate-limited modules are
+  # additionally auto-excluded (no need to list them here):
+  #   - wayback: set enable_wayback: true below to turn it back on.
+  #   - certspotter: set api_keys.sslmate (see above) to turn it back on.
   bbot_exclude_modules: []
+  # Re-enable bbot's wayback (archive.org) module. Off by default because it is
+  # slow and rate-limited for little subdomain yield; turn on for extra coverage.
+  enable_wayback: false
   batch_size: 20
   timeout_minutes: 120
 

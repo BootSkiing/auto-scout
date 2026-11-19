@@ -40,14 +40,24 @@ def _build_bbot_cmd(
     if exclude_flags:
         cmd.extend(["-rf"] + exclude_flags)
 
-    # Exclude modules. certspotter is unusably slow when unauthenticated —
-    # SSLMate rate-limits it into multi-minute per-domain stalls while producing
-    # nothing, and its certificate-transparency data is already covered by the
-    # crt/crt_db (crt.sh) and myssl modules. Drop it unless an sslmate API key is
-    # configured, which unlocks its fast, complete paginated path.
+    # Exclude modules. Start from the user's configured list, then default-exclude
+    # modules that are slow, rate-limited time-sinks relative to their yield here:
+    #   - wayback: archive.org's CDX API is slow and rate-limited (~60 req/min,
+    #     120s sleeps on 429) and returns very few subdomains per batch. It finds
+    #     unique archive-sourced subdomains, so re-enable with
+    #     subdomain_enum.enable_wayback: true if you want that coverage.
+    #   - certspotter: SSLMate rate-limits it into multi-minute stalls when
+    #     unauthenticated, and its CT data is already covered by crt/crt_db/myssl.
+    #     Auto-enabled only when api_keys.sslmate unlocks its fast paginated path.
     exclude_modules = list(sub_config.get("bbot_exclude_modules", []))
-    if not api_keys.get("sslmate") and "certspotter" not in exclude_modules:
-        exclude_modules.append("certspotter")
+    default_excludes = []
+    if not sub_config.get("enable_wayback", False):
+        default_excludes.append("wayback")
+    if not api_keys.get("sslmate"):
+        default_excludes.append("certspotter")
+    for module in default_excludes:
+        if module not in exclude_modules:
+            exclude_modules.append(module)
     if exclude_modules:
         cmd.extend(["-em"] + exclude_modules)
 
