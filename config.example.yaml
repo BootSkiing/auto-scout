@@ -11,6 +11,11 @@ api_keys:
   virustotal: ""
   github: ""
   chaos: ""
+  # Free SSLMate key (https://sslmate.com/signup) for bbot's certspotter module.
+  # Leave blank to keep certspotter disabled (it is rate-limited to the point of
+  # stalling stage 6 when unauthenticated). Setting a key auto-enables it on its
+  # fast, complete paginated path.
+  sslmate: ""
 
 seeds:
   corporations: "seeds/corporations.txt"
@@ -88,6 +93,9 @@ subdomain_enum:
   bbot_flags:
     - "subdomain-enum"
   bbot_exclude_flags: []
+  # Modules listed here are always excluded. certspotter is additionally
+  # auto-excluded unless api_keys.sslmate is set (see above), so you don't need
+  # to list it here.
   bbot_exclude_modules: []
   batch_size: 20
   timeout_minutes: 120

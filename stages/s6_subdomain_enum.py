@@ -40,8 +40,14 @@ def _build_bbot_cmd(
     if exclude_flags:
         cmd.extend(["-rf"] + exclude_flags)
 
-    # Exclude modules
-    exclude_modules = sub_config.get("bbot_exclude_modules", [])
+    # Exclude modules. certspotter is unusably slow when unauthenticated —
+    # SSLMate rate-limits it into multi-minute per-domain stalls while producing
+    # nothing, and its certificate-transparency data is already covered by the
+    # crt/crt_db (crt.sh) and myssl modules. Drop it unless an sslmate API key is
+    # configured, which unlocks its fast, complete paginated path.
+    exclude_modules = list(sub_config.get("bbot_exclude_modules", []))
+    if not api_keys.get("sslmate") and "certspotter" not in exclude_modules:
+        exclude_modules.append("certspotter")
     if exclude_modules:
         cmd.extend(["-em"] + exclude_modules)
 
@@ -60,6 +66,7 @@ def _build_bbot_cmd(
         "virustotal": "modules.virustotal.api_key",
         "github": "modules.github_codesearch.api_key",
         "chaos": "modules.chaos.api_key",
+        "sslmate": "modules.certspotter.api_key",
     }
     for key_name, config_path in key_map.items():
         key_value = api_keys.get(key_name, "")
