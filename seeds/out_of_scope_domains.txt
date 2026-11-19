@@ -1,4 +1,11 @@
-# Regex patterns for domains to always exclude (applied in stages 3, 4, 5).
-# One pattern per line. Lines starting with # are ignored.
-\.example\.com$
-retired-brand\.com$
+# Domains to always exclude, applied in stages 3, 4, 5, and 6.
+# One domain per line. Each entry matches the domain itself AND any subdomain of
+# it (e.g. "example.com" removes "example.com" and "a.example.com", but not
+# "notexample.com"). Case-insensitive. NOT regex.
+#
+# For regex-based junk filtering (CDNs, cloud hostnames), use
+# cleanup.excluded_domain_patterns in the config instead.
+#
+# Lines starting with # are ignored.
+example.com
+retired-brand.com

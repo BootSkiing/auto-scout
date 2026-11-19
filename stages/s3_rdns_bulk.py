@@ -49,6 +49,7 @@ from lib.utils import (
     read_lines, normalize_to_24, expand_cidr_to_ips,
     deduplicate_domains, filter_excluded, save_json,
 )
+from lib.scope import Scope
 
 IP_COLUMN_CANDIDATES = ["ip_address", "ip", "ipaddr", "ip_addr", "addr"]
 DOMAIN_COLUMN_CANDIDATES = ["domain", "rdns", "ptr", "name", "hostname", "host", "value"]
@@ -252,6 +253,11 @@ def _write_review(stage_dir: Path, all_domains: list[str], config: dict, logger,
         all_domains, removed = filter_excluded(all_domains, exclusion_patterns)
         if removed:
             logger.info(f"Pre-filtered {len(removed)} domains matching exclusion patterns")
+
+    # Remove out-of-scope domains before the review gate
+    scope = Scope(config)
+    all_domains, removed_oos = scope.filter_domains(all_domains)
+    scope.record(stage_dir, "domains", "post", removed_oos, logger)
 
     review_file = stage_dir / "domains_review.txt"
     header = [

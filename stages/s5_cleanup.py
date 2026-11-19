@@ -18,6 +18,7 @@ from lib.utils import (
     read_lines, write_lines, save_json,
     deduplicate_domains, filter_excluded,
 )
+from lib.scope import Scope
 
 
 def _check_parking(domain: str, indicators: list[str], timeout: int) -> dict:
@@ -101,16 +102,20 @@ def run(run_dir: Path, config: dict) -> bool:
     all_domains = deduplicate_domains(all_domains)
     logger.info(f"After deduplication: {len(all_domains)} unique domains")
 
-    # Apply exclusion patterns
+    # Apply regex exclusion patterns (cleanup: Akamai/CloudFront junk, etc.)
     exclusion_patterns = config.get("cleanup", {}).get("excluded_domain_patterns", [])
-    oos_patterns = read_lines(resolve_seed_path(config, "out_of_scope_domains"))
-    all_patterns = exclusion_patterns + oos_patterns
-
-    if all_patterns:
-        all_domains, removed = filter_excluded(all_domains, all_patterns)
+    if exclusion_patterns:
+        all_domains, removed = filter_excluded(all_domains, exclusion_patterns)
         logger.info(f"Removed {len(removed)} domains matching exclusion patterns")
         if removed:
             write_lines(stage_dir / "excluded_domains.txt", removed)
+
+    # Remove out-of-scope domains. s5 is the only place seed domains get scope-
+    # checked, and the backstop for anything approved upstream before a seed was
+    # marked out of scope.
+    scope = Scope(config)
+    all_domains, removed_oos = scope.filter_domains(all_domains)
+    scope.record(stage_dir, "domains", "post", removed_oos, logger)
 
     write_lines(stage_dir / "domains_deduped.txt", all_domains)
 

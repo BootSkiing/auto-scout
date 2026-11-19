@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import load_config, get_run_dir, get_stage_dir, resolve_seed_path, PROJECT_ROOT
 from lib.logging_setup import setup_logging
 from lib.review_gate import review_gate
-from lib.utils import read_lines, write_lines, save_json, load_json, normalize_asn
+from lib.utils import read_lines, write_lines, save_json, load_json
+from lib.scope import Scope
 
 
 def _get_cache_dir(config: dict) -> Path:
@@ -69,12 +70,10 @@ def _load_ip_dat(path: Path) -> list[tuple[str, str]]:
 def _search_asns(
     asn_data: dict[str, str],
     corporation_names: list[str],
-    oos_asns: set[str],
     logger,
 ) -> list[dict]:
     results = []
     seen_asns = set()
-    oos_count = 0
 
     for corp in corporation_names:
         corp_lower = corp.lower()
@@ -83,22 +82,16 @@ def _search_asns(
                 continue
             if corp_lower in description.lower():
                 seen_asns.add(asn_num)
-                entry = {
+                results.append({
                     "asn": asn_num,
                     "description": description,
                     "matched_corporation": corp,
                     "include": True,
-                }
-                if normalize_asn(asn_num) in oos_asns:
-                    entry["include"] = False
-                    entry["excluded_reason"] = "out_of_scope"
-                    oos_count += 1
-                results.append(entry)
+                })
 
-    msg = f"Found {len(results)} unique ASNs matching {len(corporation_names)} corporation names"
-    if oos_count:
-        msg += f" ({oos_count} pre-excluded as out of scope)"
-    logger.info(msg)
+    logger.info(
+        f"Found {len(results)} unique ASNs matching {len(corporation_names)} corporation names"
+    )
     return results
 
 
@@ -148,23 +141,19 @@ def run(run_dir: Path, config: dict) -> bool:
     asn_data = _load_asn_json(asn_json_path)
     logger.info(f"Loaded {len(asn_data)} ASN entries")
 
+    scope = Scope(config)
     corporations = read_lines(resolve_seed_path(config, "corporations"))
 
-    # Drop out-of-scope corporation terms before matching (case-insensitive exact)
-    oos_terms = {t.lower() for t in read_lines(resolve_seed_path(config, "out_of_scope_terms"))}
-    if oos_terms:
-        kept_corps = [c for c in corporations if c.lower() not in oos_terms]
-        dropped = len(corporations) - len(kept_corps)
-        if dropped:
-            logger.info(f"Dropped {dropped} out-of-scope corporation term(s) before ASN search")
-        corporations = kept_corps
+    # Pre-filter: drop out-of-scope corporation terms before searching the ASN DB
+    corporations, removed_terms = scope.filter_terms(corporations)
+    scope.record(stage_dir, "terms", "pre", removed_terms, logger)
 
-    # Persistent out-of-scope ASNs (normalized to bare numeric form)
-    oos_asns = {normalize_asn(a) for a in read_lines(resolve_seed_path(config, "out_of_scope_asns"))}
-    if oos_asns:
-        logger.info(f"Loaded {len(oos_asns)} out-of-scope ASN(s)")
+    asn_results = _search_asns(asn_data, corporations, logger)
 
-    asn_results = _search_asns(asn_data, corporations, oos_asns, logger)
+    # Post-filter: remove out-of-scope ASNs before the review gate so they never
+    # reach the reviewer and never get IP prefixes extracted.
+    asn_results, removed_asns = scope.filter_asns(asn_results)
+    scope.record(stage_dir, "asns", "post", removed_asns, logger)
 
     if not asn_results:
         logger.warning("No ASNs found matching any corporation names")

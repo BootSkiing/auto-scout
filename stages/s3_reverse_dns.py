@@ -21,6 +21,7 @@ from lib.utils import (
     read_lines, write_lines, save_json, load_json,
     normalize_to_24, expand_cidr_to_ips, deduplicate_domains, filter_excluded,
 )
+from lib.scope import Scope
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -265,12 +266,17 @@ def run(run_dir: Path, config: dict) -> bool:
     # Save raw results
     save_json(stage_dir / "rdns_raw.json", domains_found)
 
-    # Filter out excluded patterns
+    # Filter out excluded patterns (regex cleanup: Akamai/CloudFront junk, etc.)
     exclusion_patterns = config.get("cleanup", {}).get("excluded_domain_patterns", [])
     if exclusion_patterns:
         all_domains, removed = filter_excluded(all_domains, exclusion_patterns)
         if removed:
             logger.info(f"Pre-filtered {len(removed)} domains matching exclusion patterns")
+
+    # Remove out-of-scope domains before the review gate
+    scope = Scope(config)
+    all_domains, removed_oos = scope.filter_domains(all_domains)
+    scope.record(stage_dir, "domains", "post", removed_oos, logger)
 
     # Write review file
     review_file = stage_dir / "domains_review.txt"

@@ -26,9 +26,17 @@ def load_config(config_path: str = None) -> dict:
     return config
 
 
-def validate_seeds(config: dict) -> list[str]:
+def validate_seeds(config: dict) -> tuple[list[str], list[str]]:
+    """Return (errors, warnings).
+
+    corporations and domains are required (missing/empty is an error). The whois
+    and out_of_scope lists are optional (missing is only a warning), matching how
+    stage 1 treats them.
+    """
     errors = []
+    warnings = []
     seeds = config.get("seeds", {})
+
     for key in ("corporations", "domains"):
         path = PROJECT_ROOT / seeds.get(key, "")
         if not path.exists():
@@ -40,9 +48,9 @@ def validate_seeds(config: dict) -> list[str]:
                 "out_of_scope_terms", "out_of_scope_asns"):
         path = PROJECT_ROOT / seeds.get(key, "")
         if not path.exists():
-            errors.append(f"Seed file missing: {path}")
+            warnings.append(f"Optional seed file missing: {path}")
 
-    return errors
+    return errors, warnings
 
 
 def validate_api_keys(config: dict, stages: list[str]) -> list[str]:

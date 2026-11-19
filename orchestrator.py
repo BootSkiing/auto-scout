@@ -140,7 +140,9 @@ def main():
 
     logger.info(f"Run directory: {run_dir}")
 
-    seed_errors = validate_seeds(config)
+    seed_errors, seed_warnings = validate_seeds(config)
+    for w in seed_warnings:
+        logger.warning(w)
     if seed_errors and not (args.only and args.only != "s1_seeds"):
         for err in seed_errors:
             logger.error(err)

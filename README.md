@@ -140,9 +140,19 @@ cleanup:
     # Strings in HTTP response bodies that indicate a parked domain
 ```
 
-These are applied automatically during stage 5 (cleanup). Domains matching `excluded_domain_patterns` are removed. Domains whose HTTP response contains any `parking_indicators` string are flagged as parked and removed.
+These are applied automatically during stage 5 (cleanup). Domains matching `excluded_domain_patterns` (regex) are removed. Domains whose HTTP response contains any `parking_indicators` string are flagged as parked and removed.
 
-Additional exclusions live in the `seeds/out_of_scope_*.txt` files (see [Seed Files](#seed-files)). `out_of_scope_domains.txt` holds regex patterns applied during cleanup.
+#### Out-of-scope lists
+
+The `seeds/out_of_scope_*.txt` files (see [Seed Files](#seed-files)) are the scoping mechanism, distinct from the regex `excluded_domain_patterns` above. Each relevant list is checked twice per stage: **before** the stage does its work (to avoid wasted queries/API calls) and **after** discovery, before the human review gate (so reviewers only see in-scope candidates). Removed items are deleted outright and logged to `<stage>/scope_removed.json` with the rule each one matched.
+
+| List | Matching | Checked in |
+|------|----------|------------|
+| `out_of_scope_domains.txt` | Exact domain **and all subdomains** (`example.com` removes `example.com` and `*.example.com`, not `notexample.com`). Case-insensitive, not regex. | s3, s4, s5, s6 |
+| `out_of_scope_terms.txt` | Exact, case-insensitive term. Drops corporation terms (s2 ASN search) and whois names/orgs/emails (s4). | s2, s4 |
+| `out_of_scope_asns.txt` | Normalized ASN (`AS1234` = `1234`). | s2 |
+
+For regex-based junk filtering (CDNs, cloud hostnames), use `cleanup.excluded_domain_patterns` instead — that is a separate feature from the scope lists.
 
 ### Reverse DNS (Stage 3)
 
@@ -231,8 +241,8 @@ Seed files live in `seeds/` and are the manual inputs that drive the pipeline. O
 | `whois_names.txt` | Registrant names for reverse WHOIS lookups | No |
 | `whois_orgs.txt` | Company/organization names for reverse WHOIS | No |
 | `whois_emails.txt` | Registrant email addresses for reverse WHOIS | No |
-| `out_of_scope_domains.txt` | Regex patterns for domains to always exclude | No |
-| `out_of_scope_terms.txt` | Substrings that mark a discovered domain or ASN as out of scope | No |
+| `out_of_scope_domains.txt` | Domains to always exclude; matches the domain and all subdomains (exact, not regex) | No |
+| `out_of_scope_terms.txt` | Search terms to never query — corporation terms (s2) and whois names/orgs/emails (s4); exact case-insensitive match | No |
 | `out_of_scope_asns.txt` | ASNs to exclude from discovery (e.g. `AS14618`) | No |
 
 ### Example seed files
@@ -272,14 +282,14 @@ admin@acmecorp.net
 
 **out_of_scope_domains.txt**
 ```
-# Regex patterns, one per line
-\.example\.com$
-retired-brand\.com$
+# One domain per line; matches the domain and all its subdomains
+example.com
+retired-brand.com
 ```
 
 **out_of_scope_terms.txt**
 ```
-# Substrings, one per line
+# Exact search terms, one per line (case-insensitive)
 staging
 internal-test
 ```
@@ -383,7 +393,7 @@ Validates that all required seed files exist and are non-empty. Copies them into
 
 Downloads the [asndb.network](https://asndb.network/) ASN-to-organization and IP-to-ASN datasets. Searches for corporation name matches (case-insensitive substring) and extracts all CIDR prefixes for matched ASNs.
 
-**Review gate** — Produces `asns_review.json` listing each matched ASN with its description, matched corporation, prefix count, and an `"include": true` flag. Set `"include": false` for out-of-scope ASNs and save as `asns_approved.json`.
+**Review gate** — Produces `asns_review.json` listing each matched ASN with its description, matched corporation, prefix count, and an `"include": true` flag. ASNs in `out_of_scope_asns.txt` are removed before this file is written (see `scope_removed.json`), so the list is already scoped. Set `"include": false` for any remaining ASNs you want to drop and save as `asns_approved.json`.
 
 **Output** — `ip_ranges.txt` containing all CIDR blocks for approved ASNs.
 
@@ -393,7 +403,7 @@ Queries ip.thc.org for each IP in the ranges from stage 2 to find hosted domains
 
 Two backends are available via `--rdns-mode` (see [Reverse DNS (Stage 3)](#reverse-dns-stage-3)): `api` (default) hits the per-IP ip.thc.org API; `bulk` queries THC's monthly bulk snapshot locally with DuckDB, which avoids the API rate limit for large scopes. Both produce identical outputs.
 
-**Review gate** — Produces `domains_review.txt` with all discovered domains (pre-filtered against exclusion patterns). Remove out-of-scope domains and save as `domains_approved.txt`.
+**Review gate** — Produces `domains_review.txt` with all discovered domains, pre-filtered against both the regex `excluded_domain_patterns` and the `out_of_scope_domains.txt` list (removals logged to `scope_removed.json`). Remove any remaining out-of-scope domains and save as `domains_approved.txt`.
 
 ### Stage 4: Reverse WHOIS (`s4_rwhois`)
 
@@ -406,13 +416,13 @@ Queries the Whoxy API using three search types:
 
 ### Stage 5: Cleanup (`s5_cleanup`)
 
-Merges domains from seeds, stage 3, and stage 4. Deduplicates, applies exclusion patterns, and runs threaded parking page detection (HTTP checks against configurable indicators). Domains that time out are kept — they may be internal or VPN-only.
+Merges domains from seeds, stage 3, and stage 4. Deduplicates, applies the regex exclusion patterns and the `out_of_scope_domains` list, and runs threaded parking page detection (HTTP checks against configurable indicators). Domains that time out are kept — they may be internal or VPN-only. This is the only place seed domains are scope-checked, and the backstop for anything approved upstream before a domain was marked out of scope.
 
 **Output** — `domains_final.txt`, the master domain list used by all subsequent stages.
 
 ### Stage 6: Subdomain Enumeration (`s6_subdomains`)
 
-Runs bbot in passive-only mode against every domain in `domains_final.txt`. Processes domains in batches (default 20) to manage memory. API keys from `config.yaml` are passed to bbot modules for better coverage.
+Runs bbot in passive-only mode against every domain in `domains_final.txt`. Processes domains in batches (default 20) to manage memory. API keys from `config.yaml` are passed to bbot modules for better coverage. Newly discovered subdomains are filtered against `out_of_scope_domains` before being written, so out-of-scope assets don't flow into port scanning or web analysis (there is no human gate at this stage).
 
 **Output** — `subdomains.txt` and `subdomains_by_domain.json`.
 

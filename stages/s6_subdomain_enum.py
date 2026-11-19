@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import load_config, get_run_dir, get_stage_dir
 from lib.logging_setup import setup_logging
 from lib.utils import read_lines, write_lines, deduplicate_domains, run_command
+from lib.scope import Scope
 
 
 def _build_bbot_cmd(
@@ -176,6 +177,12 @@ def run(run_dir: Path, config: dict) -> bool:
 
     all_subdomains = deduplicate_domains(all_subdomains)
     logger.info(f"Total unique subdomains: {len(all_subdomains)}")
+
+    # Remove out-of-scope subdomains newly discovered here so they don't flow
+    # into port scanning / web analysis. (s6 has no human gate.)
+    scope = Scope(config)
+    all_subdomains, removed_oos = scope.filter_domains(all_subdomains)
+    scope.record(stage_dir, "domains", "post", removed_oos, logger)
 
     write_lines(output_file, all_subdomains)
 

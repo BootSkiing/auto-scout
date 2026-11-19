@@ -19,6 +19,7 @@ from lib.utils import (
     read_lines, write_lines, save_json, load_json,
     deduplicate_domains, filter_excluded,
 )
+from lib.scope import Scope
 
 
 def _check_balance(api_key: str, base_url: str, logger) -> int | None:
@@ -124,14 +125,10 @@ def run(run_dir: Path, config: dict) -> bool:
     for email in emails:
         search_jobs.append(("email", email))
 
-    # Drop out-of-scope search terms (case-insensitive exact match on the value)
-    oos_terms = {t.lower() for t in read_lines(resolve_seed_path(config, "out_of_scope_terms"))}
-    if oos_terms:
-        kept_jobs = [(st, v) for (st, v) in search_jobs if v.lower() not in oos_terms]
-        skipped = len(search_jobs) - len(kept_jobs)
-        if skipped:
-            logger.info(f"Skipped {skipped} out-of-scope WHOIS search term(s)")
-        search_jobs = kept_jobs
+    # Pre-filter: drop out-of-scope search terms before querying (saves API calls)
+    scope = Scope(config)
+    search_jobs, removed_terms = scope.filter_terms(search_jobs, key=lambda j: j[1])
+    scope.record(stage_dir, "terms", "pre", removed_terms, logger)
 
     if not search_jobs:
         logger.warning("No WHOIS search terms found in seed files")
@@ -156,20 +153,16 @@ def run(run_dir: Path, config: dict) -> bool:
     all_domains = deduplicate_domains(all_domains)
     logger.info(f"Total unique domains: {len(all_domains)}")
 
-    # Pre-filter exclusions
+    # Pre-filter exclusions (regex cleanup: Akamai/CloudFront junk, etc.)
     exclusion_patterns = config.get("cleanup", {}).get("excluded_domain_patterns", [])
     if exclusion_patterns:
         all_domains, removed = filter_excluded(all_domains, exclusion_patterns)
         if removed:
             logger.info(f"Pre-filtered {len(removed)} domains matching exclusion patterns")
 
-    # Also filter against out-of-scope domain patterns
-    oos_path = resolve_seed_path(config, "out_of_scope_domains")
-    oos_patterns = read_lines(oos_path)
-    if oos_patterns:
-        all_domains, removed = filter_excluded(all_domains, oos_patterns)
-        if removed:
-            logger.info(f"Filtered {len(removed)} domains matching out-of-scope patterns")
+    # Remove out-of-scope domains before the review gate
+    all_domains, removed_oos = scope.filter_domains(all_domains)
+    scope.record(stage_dir, "domains", "post", removed_oos, logger)
 
     # Write review file
     review_file = stage_dir / "domains_review.txt"
