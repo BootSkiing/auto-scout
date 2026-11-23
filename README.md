@@ -17,555 +17,174 @@
               A U T O - S C O U T
 ```
 
-An automated external asset enumeration pipeline for authorized security assessments. The pipeline discovers internet-facing assets through ASN lookups, reverse DNS, reverse WHOIS, and subdomain enumeration, and performs follow-up recon via port scanning and web screenshotting.
+Automated external asset enumeration for **authorized** security assessments. Auto-Scout discovers an organization's internet-facing footprint from a handful of seed names/domains, then hands it to active recon — turning "who are they online?" into a reviewed asset inventory with open ports, services, and screenshots.
 
-Each stage reads input files, produces output files, and can be run independently. Human review gates pause the pipeline at key checkpoints so you can approve or trim results before proceeding.
+It runs as nine independent stages. Each reads files and writes files, so any stage can run on its own, and human review gates pause the run at key points so you approve or trim results before anything downstream acts on them.
 
-## Legal and Authorized Use
+**Features**
 
-This is an active reconnaissance tool. It performs port scanning, service
-fingerprinting, and web probing that contacts hosts directly. Obviously get permission before running it.
+- **Discovery:** ASN lookups ([asndb.network](https://asndb.network/)), reverse DNS ([ip.thc.org](https://ip.thc.org/) — live API or offline bulk snapshot), reverse WHOIS (Whoxy), passive subdomain enumeration (bbot).
+- **Active recon:** full-port scanning + service fingerprinting (masscan → nmap), web screenshotting (gowitness), DNS-security checks and Google-dork generation.
+- **Control:** human review gates, two-layer scope filtering, resumable stages (and `--force` for clean re-runs), Excel service inventory.
 
-## Prerequisites
+> ⚠️ **Authorized use only.** This is an *active* recon tool — it port-scans, fingerprints services, and probes web apps by contacting hosts directly. Get written permission before running it against anything you don't own.
 
-- Python 3.10+ (w/ pip and venv)
-- [pipx](https://pipx.pypa.io/stable/)
-- [nmap](https://nmap.org/)
-- `dig`, `curl`, `jq` (standard Linux utilities)
-
-Optional (installed by `setup.sh`):
-
-- [bbot](https://github.com/blacklanternsecurity/bbot) (v3.x)
-- [masscan](https://github.com/robertdavidgraham/masscan) — fast alive-host discovery (falls back to nmap if missing)
-- [gowitness](https://github.com/sensepost/gowitness) (v3.x) — web screenshotting
-
-Optional (manual install, only for bulk reverse DNS — see [Reverse DNS (Stage 3)](#reverse-dns-stage-3)):
-
-- [DuckDB CLI](https://duckdb.org/) — queries THC's monthly bulk rDNS snapshot offline instead of the per-IP API (`curl https://install.duckdb.org | sh`)
-
-## Installation
+## Setup
 
 ```bash
-sudo apt update && sudo apt install python3 python3-pip python3-venv pipx nmap masscan chromium-browser
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv pipx nmap masscan chromium-browser
 git clone https://github.com/BootSkiing/auto-scout && cd auto-scout
 python3 -m venv . && source bin/activate
-./setup.sh
-cp config.example.yaml config.yaml   # then add your API keys
+./setup.sh                             # installs deps, bbot (pipx), gowitness; creates seed templates
+cp config.example.yaml config.yaml     # then add your API keys
 ```
 
-`setup.sh` will:
-1. Install Python dependencies (`pip3 install -r requirements.txt`)
-2. Install bbot via `pipx` (isolated, since bbot is used as a CLI, not imported)
-3. Check for / install masscan and gowitness
-4. Create seed file templates in `seeds/`
-5. Validate that all required tools are on your PATH
+Requires Python 3.10+, `nmap`, and `dig`/`curl`/`jq`. `setup.sh` installs the optional tools and prints manual steps for anything it can't: masscan and gowitness degrade gracefully if missing, but **bbot is required for stage 6**.
 
-If any tool cannot be installed automatically, the script prints manual
-instructions. masscan and gowitness are optional — the pipeline degrades
-gracefully without them. bbot is required for stage 6; if `pipx` is not present,
-the script tells you how to install both.
+> **bbot PATH:** pipx installs `bbot` to `~/.local/bin`, which isn't on a fresh Ubuntu `PATH`. `run.sh` prepends it automatically; if you call `orchestrator.py` directly, add `~/.local/bin` to your `PATH` (or open a new shell after `setup.sh`).
 
-> **bbot / PATH note.** `pipx install bbot` places the `bbot` binary in pipx's
-> bin directory (usually `~/.local/bin`), which is **not** on a fresh Ubuntu
-> system's `PATH`. `setup.sh` runs `pipx ensurepath` for you, but that only
-> edits your shell profile — it does not change your *current* shell. After
-> setup, **open a new shell** (or run `source ~/.bashrc`) so that `bbot`
-> resolves in your terminal. As a safety net, `run.sh` also prepends pipx's
-> bin directory to `PATH`, so the pipeline finds `bbot` even if you haven't
-> restarted your shell. If you invoke `orchestrator.py` directly (instead of
-> via `run.sh`), make sure `~/.local/bin` is on your `PATH` yourself.
+### Configuration
 
-## Configuration
+Everything lives in `config.yaml` (a copy of the fully-commented `config.example.yaml`). The essentials:
 
-Configuration lives in `config.yaml`; it holds your API keys. Copy the provided template and edit your copy:
+- **API keys** — `api_keys.whoxy` is the only key the core pipeline requires ([whoxy.com](https://www.whoxy.com/), free tier available). Shodan / Censys / SecurityTrails / VirusTotal / GitHub / Chaos keys are optional and improve stage-6 subdomain coverage.
+- **Review mode** — `review.mode: halt` (default; stop for manual review) or `auto` (unattended, auto-approve).
+- **Port scanning** — `port_scan.scan_mode: full` (all 65,535 ports) or `top-ports` (fast); rate, retries, timeouts, and the all-open cap are tunable. See [Stage 7](#stage-7-port-scanning-s7_portscan) and [Gotchas](#gotchas).
 
-```bash
-cp config.example.yaml config.yaml
-```
+### Scope vs. exclusions
 
-### API Keys
+Two separate filtering mechanisms:
 
-```yaml
-api_keys:
-  whoxy: "your-whoxy-api-key"       # Required for stage 4 (reverse WHOIS)
-  shodan: ""                          # Optional, improves subdomain coverage
-  censys_id: ""
-  censys_secret: ""
-  securitytrails: ""
-  virustotal: ""
-  github: ""                          # GitHub personal access token
-  chaos: ""                           # ProjectDiscovery Chaos API key
-```
+| Mechanism | What it's for | Matching | Applied in |
+|---|---|---|---|
+| `seeds/out_of_scope_{domains,terms,asns}.txt` | your explicit scope boundaries | exact (domain + subdomains / term / ASN); case-insensitive | each relevant stage, before work **and** before review |
+| `cleanup.excluded_domain_patterns` | shared CDN / DNS-edge / WAF junk (Akamai, Fastly, CloudFront, Cloudflare, Azure CDN/DNS…) | regex, case-insensitive | s3, s4, s5 |
 
-**Whoxy** is the only key required by the core pipeline. Get one at [whoxy.com](https://www.whoxy.com/). The bbot-related keys (shodan, censys, etc.) are optional and improve subdomain enumeration results in stage 6. Free tiers are available for most.
+Cloud *hosting* (`*.amazonaws.com` S3/ELB/EC2, `*.azurewebsites.net`, etc.) is deliberately **not** excluded — a target's own assets live there. Every scope removal is logged to `<stage>/scope_removed.json`.
 
-### Review Gate Mode
+### Seed files
 
-```yaml
-review:
-  mode: "halt"    # "halt" (default) or "auto"
-```
-
-- **halt** — The pipeline stops when a review is needed, prints the file path to review, and exits cleanly. You edit the file at your leisure, then re-run to continue.
-- **auto** — Review files are auto-approved without stopping. Useful for fully unattended runs once you trust your seed data and exclusion patterns.
-
-### Port Scan Tuning
-
-```yaml
-port_scan:
-  scan_mode: full                  # "full" = all 65535 TCP ports; "top-ports" = top N only (fast)
-  masscan_rate: 40000              # Packets/sec. Bandwidth is not the limit; on EC2 watch the ENA pps allowance
-  masscan_retries: 1               # Re-send probes to recover packet loss (fewer false negatives); time x (retries+1)
-  masscan_source_port: null        # Optional fixed source port (pair with a firewall RST-drop rule); null = auto
-  masscan_top_ports: 1000          # Only used when scan_mode: top-ports
-  masscan_timeout: null            # Seconds; null = no timeout (needed for multi-day full scans)
-  max_open_ports_per_host: 500     # Hosts above this are treated as filtered/all-open and skipped for service scan
-  nmap_top_ports: 1000             # Only used in the no-masscan fallback
-  nmap_options: "-sV --open --version-intensity 7"
-  nmap_timing: "-T4"
-  nmap_max_parallelism: 50
-  nmap_batch_size: 1000            # Service scan is sharded; a stuck batch is skipped and the rest continue
-  nmap_timeout: 3600               # Per-batch nmap timeout (seconds)
-```
-
-In **full** mode masscan sweeps every TCP port, so services on uncommon high ports are not missed; nmap then does version detection **only on the ports masscan found open** per host (grouped by port-set so common sets collapse into one invocation). A full scan of tens of thousands of IPs runs for hours to days — that is expected, and `masscan_timeout: null` keeps it from being killed. Use **top-ports** mode for a fast pass.
-
-masscan requires root; the pipeline runs it as `sudo -n masscan`, so configure passwordless sudo for the masscan binary or the stage falls back to a much slower direct nmap scan. Bandwidth is never the bottleneck for SYN scanning (tens of Mbps even at high rates) — on EC2 the real limits are the ENA packets-per-second and security-group connection-tracking allowances, so start the rate conservatively and watch the ENA CloudWatch counters. See the inline comments in `config.example.yaml` for details.
-
-### Exclusion Patterns
-
-```yaml
-cleanup:
-  excluded_domain_patterns:
-    - '\.akamai\.net$'
-    - '\.edgekey\.net$'
-    - '\.fastly\.net$'
-    - '\.cloudfront\.net$'
-    # Shared CDN / DNS-edge / WAF infra — see config.example.yaml for the full list
-  parking_indicators:
-    - "parked free"
-    - "godaddy"
-    - "this domain is for sale"
-    # Strings in HTTP response bodies that indicate a parked domain
-```
-
-These are applied automatically during stages 3, 4, and 5. Domains matching `excluded_domain_patterns` (regex, case-insensitive) are removed. Domains whose HTTP response contains any `parking_indicators` string are flagged as parked and removed in stage 5.
-
-The pattern list targets **shared CDN / DNS-edge / WAF infrastructure** (Akamai, Fastly, CloudFront, Cloudflare, Azure CDN/DNS, etc.) — never the target's own scannable assets. Cloud *hosting* (`*.amazonaws.com` S3/ELB/EC2, `*.azurewebsites.net`, and similar) is intentionally **not** excluded, because a target's own assets live there. The shipped list in `config.example.yaml` documents this split.
-
-#### Out-of-scope lists
-
-The `seeds/out_of_scope_*.txt` files (see [Seed Files](#seed-files)) are the scoping mechanism, distinct from the regex `excluded_domain_patterns` above. Each relevant list is checked twice per stage: **before** the stage does its work (to avoid wasted queries/API calls) and **after** discovery, before the human review gate (so reviewers only see in-scope candidates). Removed items are deleted outright and logged to `<stage>/scope_removed.json` with the rule each one matched.
-
-| List | Matching | Checked in |
-|------|----------|------------|
-| `out_of_scope_domains.txt` | Exact domain **and all subdomains** (`example.com` removes `example.com` and `*.example.com`, not `notexample.com`). Case-insensitive, not regex. | s3, s4, s5, s6 |
-| `out_of_scope_terms.txt` | Exact, case-insensitive term. Drops corporation terms (s2 ASN search) and whois names/orgs/emails (s4). | s2, s4 |
-| `out_of_scope_asns.txt` | Normalized ASN (`AS1234` = `1234`). | s2 |
-
-For regex-based junk filtering (shared CDN / DNS-edge infra), use `cleanup.excluded_domain_patterns` instead — that is a separate feature from the scope lists.
-
-### Reverse DNS (Stage 3)
-
-Stage 3 has two interchangeable backends, selected with `--rdns-mode` (default `api`). Both write the same `domains_review.txt` / `rdns_raw.json` outputs, so downstream stages don't care which you used.
-
-#### API mode (default)
-
-```yaml
-reverse_dns:
-  base_url: "https://ip.thc.org"
-  page_size: 100
-  request_delay_seconds: 2.0       # Seconds between requests (THC refills 0.5 req/s)
-  progress_save_interval: 50       # Save checkpoint every N IPs
-  max_retries_on_429: 6            # Per-IP retries with exponential backoff on HTTP 429
-  max_consecutive_failures: 5      # Abort and save if this many IPs fail in a row
-```
-
-Queries the ip.thc.org API one IP at a time. The API rate limit is 250 requests, replenishing at 0.5/sec, so the default 2-second delay stays well within limits. A full scan of a large range can take many hours; the stage saves progress checkpoints so it can resume if interrupted.
-
-#### Bulk mode (`--rdns-mode bulk`)
-
-For large scopes, query THC's monthly bulk snapshot locally with DuckDB instead of the API — no rate limit, minutes-to-hours instead of ~a day — at the cost of freshness (the snapshot is monthly, not live). Coverage matches the API scan: it expands the same stage-2 CIDRs to the same target IPs.
-
-> **Disk space:** the snapshot is large. Budget roughly **~51GB** for the compressed download, **~79GB** for the decompressed parquet, and **~130GB free** during decompression (both files exist at once). You can delete the `.gz` once `gunzip` finishes to reclaim the compressed copy. The decompressed `~79GB` parquet must remain on disk for every run that uses bulk mode.
-
-```yaml
-reverse_dns:
-  bulk:
-    duckdb_bin: "duckdb"           # Path to the DuckDB CLI binary
-    parquet_path: ""               # Path to the DECOMPRESSED rdns-*.parquet
-    ip_column: ""                  # Auto-detected from the parquet schema when empty
-    domain_column: ""              # Auto-detected when empty
-    max_expanded_ips: 20000000     # Safety cap on the expanded target-IP set
-    query_timeout_seconds: 7200    # DuckDB scan can take a while on a ~79GB file
-```
-
-One-time setup:
-
-**1. Install the DuckDB CLI.** Not blocked by the proxy (unlike PyPI):
-
-```bash
-curl https://install.duckdb.org | sh
-```
-
-The installer drops the binary at `~/.duckdb/cli/latest/duckdb` and prints a line to add it to your `PATH`. Either add it, or set `reverse_dns.bulk.duckdb_bin` to that full path. Verify:
-
-```bash
-duckdb --version
-```
-
-**2. Download the monthly snapshot.** THC publishes the full dataset (~6.5B records) at the end of each month on Hugging Face as `rdns-<month>.parquet.gz` (~51GB compressed / ~79GB uncompressed). Copy the current month's Parquet link from the [bulk data access page](https://ip.thc.org/docs/bulk-data-access) — the URL path encodes the *release* month while the filename encodes the *data* month, so don't assume it. For the October 2026 snapshot (released Nov 2026):
-
-```bash
-curl -L -C - -o rdns-oct.parquet.gz \
-  'https://huggingface.co/buckets/IP-THC-ORG/Datasets/resolve/2026/11/rdns-oct.parquet.gz?download=true'
-```
-
-`-C -` resumes a partial download if the transfer drops — useful on a 51GB file.
-
-> **Heads up:** Hugging Face is blocked by the corporate Zscaler policy, so run this download off-network and copy the `.gz` onto the host.
-
-**3. Decompress it.** DuckDB can't read a gzipped parquet, so unzip first (see the disk-space note above — budget ~130GB free while both files exist):
-
-```bash
-gunzip rdns-oct.parquet.gz        # -> rdns-oct.parquet (~79GB); removes the .gz on success
-```
-
-**4. Point config at the file** via `reverse_dns.bulk.parquet_path`, or pass `--parquet` when running the stage standalone. The `ip`/`domain` columns are auto-detected from the parquet schema (override with `reverse_dns.bulk.ip_column` / `domain_column` if detection fails):
-
-```yaml
-reverse_dns:
-  bulk:
-    parquet_path: "/path/to/rdns-oct.parquet"
-```
-
-Then run the pipeline with `./run.sh --rdns-mode bulk`.
-
-## Seed Files
-
-Seed files live in `seeds/` and are the manual inputs that drive the pipeline. One entry per line; lines starting with `#` are comments.
+Manual inputs in `seeds/` (one entry per line, `#` for comments); `setup.sh` creates templates.
 
 | File | Purpose | Required |
-|------|---------|----------|
-| `corporations.txt` | Corporation names to search for ASNs | Yes |
-| `domains.txt` | Known root domains for the target | Yes |
-| `whois_names.txt` | Registrant names for reverse WHOIS lookups | No |
-| `whois_orgs.txt` | Company/organization names for reverse WHOIS | No |
-| `whois_emails.txt` | Registrant email addresses for reverse WHOIS | No |
-| `out_of_scope_domains.txt` | Domains to always exclude; matches the domain and all subdomains (exact, not regex) | No |
-| `out_of_scope_terms.txt` | Search terms to never query — corporation terms (s2) and whois names/orgs/emails (s4); exact case-insensitive match | No |
-| `out_of_scope_asns.txt` | ASNs to exclude from discovery (e.g. `AS14618`) | No |
+|---|---|---|
+| `corporations.txt` | names to search for ASNs | **yes** |
+| `domains.txt` | known root domains | **yes** |
+| `whois_{names,orgs,emails}.txt` | reverse-WHOIS search terms | no |
+| `out_of_scope_{domains,terms,asns}.txt` | scope exclusions (see above) | no |
 
-### Example seed files
-
-**corporations.txt**
-```
-Acme Corporation
-Acme Holdings LLC
-Acme International
-```
-
-**domains.txt**
-```
-acme.com
-acmecorp.net
-acme-holdings.com
-```
-
-**whois_names.txt**
-```
-John Smith
-Jane Doe
-```
-
-**whois_orgs.txt**
-```
-Acme Corporation
-ACME CORP
-Acme Holdings LLC
-```
-
-**whois_emails.txt**
-```
-domains@acme.com
-admin@acmecorp.net
-```
-
-**out_of_scope_domains.txt**
-```
-# One domain per line; matches the domain and all its subdomains
-example.com
-retired-brand.com
-```
-
-**out_of_scope_terms.txt**
-```
-# Exact search terms, one per line (case-insensitive)
-staging
-internal-test
-```
-
-**out_of_scope_asns.txt**
-```
-# ASNs to exclude, one per line
-# AS14618
-```
-
-Tips for building seed data:
-- Search Crunchbase, SEC filings, OpenCorporates, Wikipedia, and LinkedIn for subsidiary names and alternate corporation names.
-- Include common variations (LLC, Inc., Corp, abbreviations).
-- WHOIS seeds come from examining existing WHOIS records for known domains — look for registrant names, org names, and emails that are shared across the target's portfolio.
+Build corporation/WHOIS seeds from Crunchbase, SEC filings, OpenCorporates, and the WHOIS records of domains you already know; include name variants (LLC, Inc., Corp, abbreviations).
 
 ## Usage
 
-### Full Pipeline Run
-
 ```bash
-./run.sh
+./run.sh                               # full run; halts at each review gate (stages 2, 3, 4)
+./run.sh --date 2026-10-29             # resume a run: skips completed stages, picks up approved reviews
+./run.sh --from-stage s6_subdomains    # resume from a given stage
+./run.sh --only s7_portscan            # run a single stage
+./run.sh --through s5_cleanup          # run stages 1 through N
+./run.sh --review-mode auto            # unattended: auto-approve all review gates
+./run.sh --rdns-mode bulk             # stage 3 via offline snapshot instead of the live API
+./run.sh --force                       # re-run even completed stages from a clean slate
 ```
 
-Runs all 9 stages in order, using today's date as the run directory name. The pipeline halts at each review gate (stages 2, 3, and 4).
+**Review workflow:** in halt mode the run stops at stages 2–4 and prints a `*_review.*` file. Edit it, save it as the matching `*_approved.*` file (e.g. `asns_review.json` → `asns_approved.json`), and re-run with the same `--date`. Completed stages are skipped; a waiting stage picks up from the approved file.
 
-### Resume After Review
-
-After editing a review file and saving the approved version, re-run:
-
-```bash
-./run.sh --date 2026-10-29
-```
-
-Completed stages are skipped. If a stage was waiting for review and the approved file now exists, it picks up from there.
-
-### Run Specific Stages
-
-```bash
-# Resume from a specific stage (skips earlier completed stages)
-./run.sh --from-stage s5_cleanup --date 2026-10-29
-
-# Run only one stage
-./run.sh --only s7_portscan --date 2026-10-29
-
-# Run stages 1 through 5
-./run.sh --through s5_cleanup
-```
-
-### Skip Reviews (Unattended Mode)
-
-```bash
-./run.sh --review-mode auto
-```
-
-All review gates are auto-approved. Useful once you've validated your seeds and exclusion patterns.
-
-### Reverse DNS: API vs Bulk
-
-Stage 3 defaults to the per-IP ip.thc.org API. For large IP ranges, use the offline bulk backend instead (requires DuckDB and THC's monthly parquet snapshot — see [Reverse DNS (Stage 3)](#reverse-dns-stage-3) for setup):
-
-```bash
-./run.sh --rdns-mode bulk
-```
-
-`--rdns-mode api` (default) uses the live API; `--rdns-mode bulk` queries the local snapshot. Both feed the same review gate and downstream stages.
-
-### CLI Reference
+### Options
 
 ```
 ./run.sh [OPTIONS]
 
-Options:
-  --config PATH          Path to config file (default: config.yaml)
-  --date YYYY-MM-DD      Run date / directory name (default: today)
+  --config PATH          Config file (default: config.yaml)
+  --date YYYY-MM-DD      Run directory name (default: today)
   --from-stage STAGE     Resume from this stage
   --only STAGE           Run only this stage
   --through STAGE        Run stages 1 through this stage
   --review-mode MODE     "halt" (default) or "auto"
-  --rdns-mode MODE       Stage 3 backend: "api" (default, per-IP ip.thc.org)
-                         or "bulk" (local DuckDB query over THC's snapshot)
-  --force                Re-run even completed stages, wiping each stage's
-                         directory first (approved files and resume progress
-                         included) for a clean-slate run
+  --rdns-mode MODE       Stage 3 backend: "api" (default) or "bulk"
+  --force                Re-run even completed stages, wiping each stage dir first
+                         (approved files and resume progress included)
 
-Stage names:
-  s1_seeds        Validate and snapshot seed files
-  s2_asn          ASN discovery via asndb.network
-  s3_rdns         Reverse DNS via ip.thc.org API or bulk snapshot
-  s4_rwhois       Reverse WHOIS via Whoxy API
-  s5_cleanup      Merge, deduplicate, parking detection
-  s6_subdomains   Passive subdomain enumeration (bbot)
-  s7_portscan     Port scanning (masscan + nmap)
-  s8_web          Web screenshotting (gowitness)
-  s9_extras       DNS security checks + Google dorks
+Stages: s1_seeds  s2_asn  s3_rdns  s4_rwhois  s5_cleanup
+        s6_subdomains  s7_portscan  s8_web  s9_extras
 ```
 
 ## Pipeline Stages
 
 ### Stage 1: Seeds (`s1_seeds`)
-
-Validates that all required seed files exist and are non-empty. Copies them into the run directory (`runs/<date>/seeds/`) so each run is self-documenting.
+Validates that required seed files exist and are non-empty, and snapshots them into `runs/<date>/seeds/` so each run is self-documenting.
 
 ### Stage 2: ASN Discovery (`s2_asn`)
-
-Downloads the [asndb.network](https://asndb.network/) ASN-to-organization and IP-to-ASN datasets. Searches for corporation name matches (case-insensitive substring) and extracts all CIDR prefixes for matched ASNs.
-
-**Review gate** — Produces `asns_review.json` listing each matched ASN with its description, matched corporation, prefix count, and an `"include": true` flag. ASNs in `out_of_scope_asns.txt` are removed before this file is written (see `scope_removed.json`), so the list is already scoped. Set `"include": false` for any remaining ASNs you want to drop and save as `asns_approved.json`.
-
-**Output** — `ip_ranges.txt` containing all CIDR blocks for approved ASNs.
+Downloads the asndb.network datasets, matches `corporations.txt` names (case-insensitive substring), and extracts the CIDR prefixes for matched ASNs.
+**Review gate:** `asns_review.json` lists each matched ASN (`"include": true`); set `false` to drop one, save as `asns_approved.json`. **Output:** `ip_ranges.txt`.
 
 ### Stage 3: Reverse DNS (`s3_rdns`)
-
-Queries ip.thc.org for each IP in the ranges from stage 2 to find hosted domains. Supports resuming from checkpoints for large IP ranges.
-
-Two backends are available via `--rdns-mode` (see [Reverse DNS (Stage 3)](#reverse-dns-stage-3)): `api` (default) hits the per-IP ip.thc.org API; `bulk` queries THC's monthly bulk snapshot locally with DuckDB, which avoids the API rate limit for large scopes. Both produce identical outputs.
-
-**Review gate** — Produces `domains_review.txt` with all discovered domains, pre-filtered against both the regex `excluded_domain_patterns` and the `out_of_scope_domains.txt` list (removals logged to `scope_removed.json`). Remove any remaining out-of-scope domains and save as `domains_approved.txt`.
+Finds domains hosted on the stage-2 IP ranges via ip.thc.org. Two interchangeable backends (`--rdns-mode`): `api` (default, per-IP, rate-limited, resumable) or `bulk` (offline snapshot — see [Bulk reverse DNS](#bulk-reverse-dns-optional)). Both produce identical outputs.
+**Review gate:** `domains_review.txt`, pre-filtered against the exclusion patterns and out-of-scope domains → save as `domains_approved.txt`.
 
 ### Stage 4: Reverse WHOIS (`s4_rwhois`)
-
-Queries the Whoxy API using three search types:
-- **By name** — registrant names from `whois_names.txt`
-- **By company** — organization names from `whois_orgs.txt`
-- **By email** — registrant emails from `whois_emails.txt`
-
-**Review gate** — Same format as stage 3. Review `domains_review.txt`, save as `domains_approved.txt`.
+Queries Whoxy by registrant name, organization, and email (`whois_*.txt` seeds).
+**Review gate:** same as stage 3 — `domains_review.txt` → `domains_approved.txt`.
 
 ### Stage 5: Cleanup (`s5_cleanup`)
-
-Merges domains from seeds, stage 3, and stage 4. Deduplicates, applies the regex exclusion patterns and the `out_of_scope_domains` list, and runs threaded parking page detection (HTTP checks against configurable indicators). Domains that time out are kept — they may be internal or VPN-only. This is the only place seed domains are scope-checked, and the backstop for anything approved upstream before a domain was marked out of scope.
-
-**Output** — `domains_final.txt`, the master domain list used by all subsequent stages.
+Merges domains from seeds + stages 3/4, deduplicates, applies the exclusion patterns and out-of-scope domains, and runs threaded parking-page detection (domains that time out are kept — they may be internal/VPN-only). This is where seed domains get scope-checked and the backstop for anything approved before it was marked out of scope.
+**Output:** `domains_final.txt`, the master list for all later stages.
 
 ### Stage 6: Subdomain Enumeration (`s6_subdomains`)
-
-Runs bbot in passive-only mode against every domain in `domains_final.txt`. Processes domains in batches (default 20) to manage memory. API keys from `config.yaml` are passed to bbot modules for better coverage. Newly discovered subdomains are filtered against `out_of_scope_domains` before being written, so out-of-scope assets don't flow into port scanning or web analysis (there is no human gate at this stage).
-
-**Output** — `subdomains.txt` and `subdomains_by_domain.json`.
+Runs bbot passive-only against every domain in `domains_final.txt`, in batches to manage memory, using the configured API keys for coverage. New subdomains are filtered against out-of-scope domains before being written (no human gate here).
+**Output:** `subdomains.txt`, `subdomains_by_domain.json`.
 
 ### Stage 7: Port Scanning (`s7_portscan`)
+1. **Resolution gate** — drops non-host labels (underscore/service records like `_dmarc`, `_acme-challenge`, and the `_wildcard` cert-transparency artifact), resolves the remaining names to IPs (parallel `dig`), and folds in the stage-2 CIDR ranges. Filtered/unresolved names are logged to `resolution_gate.json`.
+2. **masscan** — sweeps ports across all target IPs (all 65,535 in `full` mode; top-N in `top-ports`). Its open-ports-per-host results *are* the discovery, so a host whose only open port is uncommon isn't missed, and partial output from an interrupted scan is salvaged.
+3. **nmap** — service/version scan run **per host on exactly the ports masscan found open**, grouped by port-set and sharded into batches. Hosts reporting more than `max_open_ports_per_host` open (likely firewall/LB/tarpit) are logged to `filtered_hosts.json` and skipped. Each IP is scanned via one representative hostname so nmap records the name natively; the full name-per-IP map is kept in `ip_hostname_map.json`.
+4. Merges the per-batch nmap XML into an Excel workbook (Hosts / Services / Summary).
 
-1. **Resolution gate** — filters out non-host labels (underscore/service records like `_dmarc` and `_acme-challenge`, and the `_wildcard` certificate-transparency artifact), resolves the remaining subdomains/domains to IPs (parallel `dig`), and combines them with the ASN CIDR ranges from stage 2. Filtered and unresolved names are recorded to `resolution_gate.json`.
-2. **masscan** — sweeps ports across all target IPs (all 65,535 in `full` mode, top-N in `top-ports` mode; requires passwordless sudo). Its open-ports-per-host results *are* the discovery, so a host with only a high port open is not missed, and partial output from an interrupted scan is salvaged.
-3. **nmap** — service/version scan (`-sV`) run **per host on exactly the ports masscan found open**, grouped by port-set and sharded into batches. Hosts reporting more open ports than `max_open_ports_per_host` (likely firewall/LB/tarpit) are recorded to `filtered_hosts.json` and skipped. Each IP is scanned via one representative hostname so nmap records the name natively; the complete hostname list per IP is preserved in `ip_hostname_map.json` for the report and stage 8.
-4. Merges the per-batch nmap XML and converts it to an Excel workbook with three sheets: Hosts, Services, and Summary.
-
-Re-running the stage always re-scans (there is no "already done" short-circuit) and clears stale artifacts first. If masscan is unavailable it falls back to a slower direct nmap scan.
-
-**Output** — `resolution_gate.json`, `ip_hostname_map.json`, `masscan_open_ports.json`, `masscan_alive.txt`, `filtered_hosts.json`, `nmap_results.xml`, `port_scan_results.xlsx`
+Re-running always re-scans (no "already done" short-circuit) and clears stale artifacts first. If masscan is unavailable, nmap does discovery itself (slower).
+**Output:** `port_scan_results.xlsx` + the JSON/text artifacts above.
 
 ### Stage 8: Web Analysis (`s8_web`)
-
-Parses nmap XML for any service nmap identified as HTTP-based (by service name or product — e.g., Apache, nginx, IIS) regardless of port number, and runs gowitness to screenshot each one. A configurable fallback port list is used only for open ports where nmap couldn't fingerprint the service. Produces an SQLite database browsable with gowitness's built-in web viewer.
-
-**Output** — `gowitness.sqlite3`, `screenshots/`
-
-To browse results:
+Screenshots every HTTP service nmap identified (by service/product, any port) with gowitness; a fallback port list covers open ports nmap couldn't fingerprint.
+**Output:** `gowitness.sqlite3`, `screenshots/`. Browse with:
 ```bash
 gowitness report server --db-uri sqlite:///path/to/runs/<date>/s8_web/gowitness.sqlite3 --screenshot-path /path/to/runs/<date>/s8_web/screenshots
 ```
 
 ### Stage 9: Extras (`s9_extras`)
+- **DNS security** — SPF/DMARC/DKIM per domain; flags missing records, permissive SPF (`+all`/`~all`), unenforced DMARC (`p=none`). → `dns_security.json`.
+- **Google dorks** — generated per domain/corporation (exposed files, admin panels, listings, backups). → `dorks.txt`.
 
-- **DNS Security** — Checks SPF, DMARC, and DKIM records for every domain. Flags missing records, permissive SPF (`+all`, `~all`), and unenforced DMARC (`p=none`). Output: `dns_security.json`.
-- **Google Dorks** — Generates dork queries per domain and corporation targeting exposed files, admin panels, directory listings, and backups. Output: `dorks.txt`, ready to paste into a browser.
+## Bulk reverse DNS (optional)
 
-## Output Structure
-
-Each run creates a timestamped directory:
-
-```
-runs/2026-10-29/
-├── run.log              # Full pipeline log
-├── state.json           # Stage completion status
-├── seeds/               # Snapshot of seed files used
-├── s2_asn/
-│   ├── asns_raw.json
-│   ├── asns_review.json
-│   ├── asns_approved.json
-│   └── ip_ranges.txt
-├── s3_rdns/
-│   ├── rdns_raw.json
-│   ├── domains_review.txt
-│   └── domains_approved.txt
-├── s4_rwhois/
-│   ├── rwhois_raw.json
-│   ├── domains_review.txt
-│   └── domains_approved.txt
-├── s5_cleanup/
-│   ├── all_domains_raw.txt
-│   ├── domains_deduped.txt
-│   ├── parking_check.json
-│   └── domains_final.txt
-├── s6_subdomains/
-│   ├── bbot_output/
-│   ├── subdomains.txt
-│   └── subdomains_by_domain.json
-├── s7_portscan/
-│   ├── resolution_gate.json
-│   ├── ip_hostname_map.json
-│   ├── scan_targets.txt
-│   ├── masscan_output.json
-│   ├── masscan_open_ports.json
-│   ├── masscan_alive.txt
-│   ├── filtered_hosts.json
-│   ├── nmap_results.xml
-│   └── port_scan_results.xlsx
-├── s8_web/
-│   ├── web_targets.txt
-│   ├── gowitness.sqlite3
-│   └── screenshots/
-└── s9_extras/
-    ├── dns_security.json
-    └── dorks.txt
-```
-
-`state.json` tracks which stages have completed, so re-running the pipeline skips finished work and resumes from where it left off. When a stage does re-run, it clears its own stale/regenerated outputs first while preserving approved review files and resume progress; `--force` re-runs even completed stages and wipes each stage directory entirely for a clean slate.
-
-## Typical Workflow
+Stage 3's default API is rate-limited (hours for large scopes). For big ranges, query THC's monthly snapshot offline with DuckDB instead — no rate limit, same coverage, at the cost of freshness (monthly, not live).
 
 ```bash
-# 1. Update seed files if the target scope has changed
-vim seeds/corporations.txt
-
-# 2. Start the pipeline
-./run.sh
-
-# 3. Pipeline halts at stage 2 — review ASN matches
-#    Edit asns_review.json, set "include": false for out-of-scope ASNs
-#    Save as asns_approved.json
-cp runs/2026-10-29/s2_asn/asns_review.json runs/2026-10-29/s2_asn/asns_approved.json
-vim runs/2026-10-29/s2_asn/asns_approved.json
-./run.sh --date 2026-10-29
-
-# 4. Pipeline halts at stage 3 — review reverse DNS domains
-vim runs/2026-10-29/s3_rdns/domains_review.txt
-cp runs/2026-10-29/s3_rdns/domains_review.txt runs/2026-10-29/s3_rdns/domains_approved.txt
-vim runs/2026-10-29/s3_rdns/domains_approved.txt
-./run.sh --date 2026-10-29
-
-# 5. Pipeline halts at stage 4 — review reverse WHOIS domains
-#    Same pattern: edit review file, save as approved, re-run
-
-# 6. Stages 5-9 run without stopping
-#    Cleanup → subdomain enum → port scan → web screenshots → extras
-
-# 7. Review outputs
-#    - Open port_scan_results.xlsx for the service inventory
-#    - Browse gowitness results in the web viewer
-#    - Check dns_security.json for mail security issues
-#    - Use dorks.txt for manual Google dorking
+curl https://install.duckdb.org | sh                   # 1. DuckDB CLI (not proxy-blocked)
+curl -L -C - -o rdns.parquet.gz '<huggingface-link>'   # 2. snapshot (~51GB; -C - resumes)
+gunzip rdns.parquet.gz                                 # 3. -> ~79GB parquet
+# 4. set reverse_dns.bulk.parquet_path in config.yaml, then:
+./run.sh --rdns-mode bulk
 ```
 
-## Network and Proxying
+- **Disk:** budget ~130GB free during decompression (both files exist at once); the ~79GB parquet must stay on disk for every bulk run.
+- **Hugging Face is Zscaler-blocked** — download off-network and copy the file over. Get the current month's link from THC's [bulk data access page](https://ip.thc.org/docs/bulk-data-access) (the URL path encodes the *release* month, the filename the *data* month — don't assume they match).
+- `ip`/`domain` columns auto-detect from the schema; override via `reverse_dns.bulk.{ip,domain}_column` if detection fails.
 
-**Do not use proxychains or a SOCKS/HTTP proxy with this pipeline.** Several tools (masscan, nmap SYN scans, `dig`) use raw sockets or UDP, which bypass application-layer proxies entirely. Your traffic will leak around the proxy without warning.
+## Gotchas
 
-If you need to run scans from a non-residential IP (recommended), you have two options:
+- **No proxychains / SOCKS / HTTP proxies.** masscan, nmap SYN scans, and `dig` use raw sockets/UDP that bypass application-layer proxies — your traffic leaks around them silently. To scan from a non-residential IP: run on a cloud VPS directly (stages 1–5 make no target contact, so run those locally and `rsync` the run dir over for 6–9), or route everything through a WireGuard tunnel (network-layer, so it catches raw sockets).
+- **masscan needs passwordless sudo.** It's run as `sudo -n masscan`; without it the stage falls back to a much slower direct nmap scan. Full-port scans take hours to days — expected, and `masscan_timeout: null` keeps them from being killed.
+- **Scanning from EC2:** bandwidth is *never* the limit for SYN scanning (~tens of Mbps even at high rates). The real ceilings are the **ENA packets-per-second allowance** and **security-group connection tracking** — start `masscan_rate` conservatively and watch the ENA CloudWatch `*_allowance_exceeded` counters. Make scan flows *untracked* (an all-traffic SG rule in both directions) to dodge conntrack drops, and pair `masscan_source_port` with an iptables RST-drop rule so the kernel doesn't reset masscan's probes.
+- **Large IP ranges** take many hours in stage 3 (API rate limits) — it checkpoints and resumes; or use bulk mode.
+- **Whoxy credits** are logged before/after stage 4 (`micro` mode is cheapest). **asndb datasets** cache in `.cache/asndb/`, re-downloaded after 24h.
 
-- **Run on a cloud VPS directly.** Install the pipeline on a cheap VPS and run it there. The stage isolation makes a split workflow easy — run stages 1-5 (OSINT, no target contact) locally, `rsync` the run directory to the VPS, then run `./run.sh --from-stage s6_subdomains --date <date>` remotely and `rsync` results back.
-- **Use a WireGuard VPN to a cloud VPS.** A WireGuard tunnel operates at the network layer, so it captures all traffic including raw sockets. You can use a Linux network namespace to scope the tunnel to only the pipeline's traffic. This is more setup initially but lets you run everything from one machine.
+## Output
 
-## Notes
+Each run writes to `runs/<date>/` — one subdirectory per stage, plus `run.log` and `state.json`. Highlights:
 
-- **masscan requires root** for raw socket access. The pipeline runs it non-interactively as `sudo -n masscan`, so set up passwordless sudo for the masscan binary; if it is unavailable the stage falls back to a slower direct nmap scan. Full-port scans are long-running — see [Port Scan Tuning](#port-scan-tuning) for the scan modes and the EC2 (ENA pps / security-group conntrack) considerations.
-- **Large IP ranges** (e.g., a /16 with 65K IPs) can take many hours in stage 3 due to ip.thc.org rate limits. The stage saves progress checkpoints and resumes where it left off if interrupted.
-- **Whoxy API credits** are logged before and after stage 4. The `micro` mode uses the fewest credits per query. Monitor your balance at [whoxy.com](https://www.whoxy.com/).
-- The asndb.network datasets are cached locally in `.cache/asndb/` and re-downloaded only if older than 24 hours.
+- `s7_portscan/port_scan_results.xlsx` — the service inventory (Hosts / Services / Summary)
+- `s8_web/` — screenshots + browsable gowitness DB
+- `s9_extras/` — `dns_security.json`, `dorks.txt`
+- each discovery stage — `*_review.*` → `*_approved.*`, plus `scope_removed.json`
+
+`state.json` tracks completion, so re-runs skip finished work and resume at review gates. A re-running stage first clears its own stale/regenerated outputs (keeping approved files and resume progress); `--force` wipes a stage dir entirely for a clean slate.
