@@ -116,90 +116,121 @@ def _resolution_gate(all_hostnames: list[str], stage_dir: Path, logger) -> dict[
     return ip_to_hostnames
 
 
-def _run_masscan(targets_file: str, output_file: str, config: dict, logger) -> list[str]:
+def _masscan_port_args(config: dict) -> tuple[list[str], str]:
+    """masscan's port-selection args + a short label, per scan_mode.
+
+    full      -> every TCP port (-p1-65535): nothing on a high port is missed.
+    top-ports -> the top N ports only (fast).
+    """
     scan_config = config.get("port_scan", {})
-    rate = scan_config.get("masscan_rate", 10000)
-    top_ports = scan_config.get("masscan_top_ports", 100)
-    # Host-discovery timeout. masscan runtime scales as (#targets x #ports)/rate,
-    # so at 18k+ targets the old fixed 600s was marginal; make it configurable.
-    discovery_timeout = scan_config.get("masscan_timeout", 1800)
+    if scan_config.get("scan_mode", "full") == "top-ports":
+        top = scan_config.get("masscan_top_ports", 1000)
+        return [f"--top-ports={top}"], f"top-{top}"
+    return ["-p", "1-65535"], "all-65535"
+
+
+def _parse_masscan(output_file: str, logger) -> dict[str, list[int]]:
+    """Parse masscan -oJ into {ip: [open tcp ports]} (sorted). {} on any error."""
+    ip_ports: dict[str, set[int]] = {}
+    try:
+        with open(output_file) as f:
+            content = f.read().strip()
+    except FileNotFoundError:
+        return {}
+    # Normalise masscan -oJ, tolerating a file an interrupted scan left without
+    # its closing bracket (and the trailing "," between records).
+    content = content.rstrip().rstrip(",").rstrip()
+    if not content:
+        return {}
+    if not content.startswith("["):
+        content = "[" + content
+    if not content.endswith("]"):
+        content = content + "]"
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Error parsing masscan output: {e}")
+        return {}
+    for entry in data:
+        ip = entry.get("ip", "")
+        if not ip:
+            continue
+        for p in entry.get("ports", []):
+            if p.get("status") == "open" and p.get("proto") == "tcp":
+                try:
+                    ip_ports.setdefault(ip, set()).add(int(p["port"]))
+                except (KeyError, ValueError):
+                    continue
+    return {ip: sorted(ports) for ip, ports in ip_ports.items()}
+
+
+def _run_masscan(targets_file: str, output_file: str, config: dict, logger) -> "dict[str, list[int]] | None":
+    """Run masscan; return {ip: [open ports]}.
+
+    masscan's own open-port results ARE the host discovery -- a host appears iff
+    it has an open port, so there is no separate liveness step to miss a
+    high-port-only host. Returns {} when the scan ran but found nothing, and
+    None only when masscan is unavailable or failed with no salvageable output
+    (so the caller can fall back to a direct nmap scan). Partial output from an
+    interrupted multi-day scan is kept rather than discarded.
+    """
+    scan_config = config.get("port_scan", {})
+    rate = scan_config.get("masscan_rate", 40000)
+    retries = scan_config.get("masscan_retries", 1)
+    mode = scan_config.get("scan_mode", "full")
+    # A full scan runs for days -- default to no timeout there; top-ports keeps a
+    # bound. masscan_timeout in config overrides either (null = no timeout).
+    default_timeout = None if mode == "full" else 1800
+    timeout = scan_config.get("masscan_timeout", default_timeout)
 
     if not shutil.which("masscan"):
-        logger.warning("masscan not installed -- falling back to nmap ping scan")
-        return _nmap_ping_scan(targets_file, logger, discovery_timeout)
+        logger.warning("masscan not installed -- cannot run the port sweep")
+        return None
 
+    port_args, label = _masscan_port_args(config)
     cmd = [
         "sudo", "-n", "masscan",
         "-iL", targets_file,
-        f"--top-ports={top_ports}",
+        *port_args,
         f"--rate={rate}",
+        f"--retries={retries}",
         "-oJ", output_file,
         "--open",
     ]
 
-    logger.info(f"Running masscan (rate={rate}, top-ports={top_ports})...")
-    result = run_command(cmd, timeout=discovery_timeout, logger=logger)
+    logger.info(
+        f"Running masscan (mode={mode}/{label}, rate={rate}, retries={retries}, "
+        f"timeout={'none' if timeout is None else str(timeout) + 's'})..."
+    )
+    result = run_command(cmd, timeout=timeout, logger=logger)
 
     if result.returncode != 0:
         logger.warning(
-            f"masscan failed (exit {result.returncode}), falling back to nmap ping scan. "
-            f"If this is a sudo error, configure passwordless sudo for masscan "
-            f"(sudo -n is used so the scan never blocks on a password prompt)."
+            f"masscan exited non-zero ({result.returncode}). If this is a sudo "
+            f"error, configure passwordless sudo for masscan (sudo -n is used so "
+            f"the scan never blocks on a password prompt)."
         )
         if result.stderr:
             logger.warning(f"masscan stderr: {result.stderr[:500]}")
-        return _nmap_ping_scan(targets_file, logger, discovery_timeout)
 
-    alive_ips = set()
-    try:
-        with open(output_file) as f:
-            content = f.read().strip()
-            if content.endswith(","):
-                content = content[:-1]
-            if not content.startswith("["):
-                content = "[" + content + "]"
-            data = json.loads(content)
-            for entry in data:
-                ip = entry.get("ip", "")
-                if ip:
-                    alive_ips.add(ip)
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        logger.warning(f"Error parsing masscan output: {e}")
-        return _nmap_ping_scan(targets_file, logger)
+    ip_ports = _parse_masscan(output_file, logger)
 
-    logger.info(f"masscan found {len(alive_ips)} alive hosts")
-    return sorted(alive_ips)
+    if not ip_ports:
+        # Nothing parsed: treat a clean exit as "legitimately empty", a non-zero
+        # exit as a real failure the caller should fall back from.
+        return None if result.returncode != 0 else {}
 
+    if result.returncode != 0:
+        logger.warning(
+            f"Using partial masscan results ({len(ip_ports)} hosts) despite the "
+            f"non-zero exit."
+        )
 
-def _nmap_ping_scan(targets_file: str, logger, timeout: int = 1800) -> list[str]:
-    logger.info("Running nmap ping scan for host discovery...")
-    result = run_command(
-        ["nmap", "-sn", "-iL", targets_file, "-oG", "-"],
-        timeout=timeout,
-        logger=logger,
+    total_ports = sum(len(v) for v in ip_ports.values())
+    logger.info(
+        f"masscan found {len(ip_ports)} hosts with open ports ({total_ports} open ports total)"
     )
-
-    alive_ips = []
-    if result.returncode == 0:
-        for line in result.stdout.split("\n"):
-            if "Status: Up" in line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    alive_ips.append(parts[1])
-
-    logger.info(f"nmap ping scan found {len(alive_ips)} alive hosts")
-    return alive_ips
-
-
-def _build_nmap_port_spec(config: dict) -> str:
-    scan_config = config.get("port_scan", {})
-    supplemental = scan_config.get("nmap_supplemental_ports", [])
-
-    if supplemental:
-        top_n = scan_config.get("nmap_top_ports", 1000)
-        return f"--top-ports {top_n} -p {','.join(str(p) for p in supplemental)}"
-
-    return f"--top-ports {scan_config.get('nmap_top_ports', 1000)}"
+    return ip_ports
 
 
 def _merge_nmap_xml(xml_paths: list[Path], logger) -> "ET.ElementTree | None":
@@ -243,56 +274,64 @@ def _merge_nmap_xml(xml_paths: list[Path], logger) -> "ET.ElementTree | None":
     return base_tree
 
 
-def _run_nmap(targets_file: str, output_dir: Path, config: dict, logger):
+def _run_nmap_jobs(
+    jobs: list[tuple[list[str], list[str]]],
+    output_dir: Path,
+    config: dict,
+    logger,
+    known_up: bool,
+):
+    """Run nmap for a set of (targets, port_args) jobs and merge the XML.
+
+    Each job scans its targets on its own ports, so a host is service-probed
+    only on the ports masscan actually found open -- no re-discovery. known_up
+    adds -Pn (skip host discovery) because masscan already proved the hosts
+    have open ports; skipping it avoids dropping a host that ignores pings.
+    Large jobs are sharded by nmap_batch_size so one stuck batch can't take the
+    whole scan down (failed batches are logged, skipped, and the rest reported).
+    """
     scan_config = config.get("port_scan", {})
-    options = scan_config.get("nmap_options", "-sV --open")
+    options = scan_config.get("nmap_options", "-sV --open --version-intensity 7")
     timing = scan_config.get("nmap_timing", "-T4")
-    max_parallel = scan_config.get("nmap_max_parallelism", 20)
-    supplemental = scan_config.get("nmap_supplemental_ports", [])
-    top_ports = scan_config.get("nmap_top_ports", 1000)
+    max_parallel = scan_config.get("nmap_max_parallelism", 50)
     batch_size = scan_config.get("nmap_batch_size", 1000)
     batch_timeout = scan_config.get("nmap_timeout", 3600)
 
-    targets = read_lines(targets_file)
-    if not targets:
+    base_args = options.split() + timing.split()
+    if known_up:
+        base_args.append("-Pn")
+    base_args.append(f"--max-parallelism={max_parallel}")
+
+    # Flatten jobs into batches, sharding any job whose target list is large.
+    batches: list[tuple[list[str], list[str]]] = []
+    for targets, port_args in jobs:
+        for i in range(0, len(targets), batch_size):
+            batches.append((targets[i:i + batch_size], port_args))
+
+    if not batches:
         logger.warning("No nmap targets to scan")
         return False
 
-    # Argument tail shared by every batch (all but -iL and the -o* outputs).
-    base_args: list[str] = []
-    base_args.extend(options.split())
-    base_args.extend(timing.split())
-    if supplemental:
-        port_list = ",".join(str(p) for p in supplemental)
-        base_args.extend(["--top-ports", str(top_ports), "-p", port_list])
-    else:
-        base_args.extend(["--top-ports", str(top_ports)])
-    base_args.append(f"--max-parallelism={max_parallel}")
-
-    # Shard the host list so one slow/stuck batch (hitting the per-batch
-    # timeout) can't take down the whole scan -- failed batches are logged and
-    # skipped, and the batches that finished are still reported.
-    batches = [targets[i:i + batch_size] for i in range(0, len(targets), batch_size)]
+    total_targets = sum(len(t) for t, _ in jobs)
     logger.info(
-        f"Running nmap service scan: {len(targets)} targets in {len(batches)} "
-        f"batch(es) of up to {batch_size} (per-batch timeout {batch_timeout}s)"
+        f"Running nmap service scan: {total_targets} host(s) in {len(batches)} "
+        f"batch(es) (per-batch timeout {batch_timeout}s)"
     )
 
     batch_xmls: list[Path] = []
-    for idx, batch in enumerate(batches, 1):
+    for idx, (targets, port_args) in enumerate(batches, 1):
         batch_file = output_dir / f"nmap_batch_{idx}.txt"
-        write_lines(batch_file, batch)
+        write_lines(batch_file, targets)
         xml_out = output_dir / f"nmap_results_{idx}.xml"
 
-        cmd = ["nmap", "-iL", str(batch_file)] + base_args
-        cmd.extend(["-oX", str(xml_out)])
-        cmd.extend(["-oN", str(output_dir / f"nmap_results_{idx}.nmap")])
-        cmd.extend(["-oG", str(output_dir / f"nmap_results_{idx}.gnmap")])
+        cmd = ["nmap", "-iL", str(batch_file)] + base_args + port_args
+        cmd += ["-oX", str(xml_out),
+                "-oN", str(output_dir / f"nmap_results_{idx}.nmap"),
+                "-oG", str(output_dir / f"nmap_results_{idx}.gnmap")]
 
-        logger.info(f"nmap batch {idx}/{len(batches)} ({len(batch)} targets)...")
+        logger.info(f"nmap batch {idx}/{len(batches)} ({len(targets)} host(s))...")
         logger.debug(f"nmap command: {' '.join(cmd)}")
         result = run_command(cmd, timeout=batch_timeout, logger=logger)
-
         if result.returncode != 0:
             logger.warning(
                 f"nmap batch {idx}/{len(batches)} did not finish cleanly "
@@ -479,42 +518,76 @@ def run(run_dir: Path, config: dict) -> bool:
     targets_file = stage_dir / "scan_targets.txt"
     write_lines(targets_file, scan_targets)
 
-    # Phase 1: Alive host discovery
+    # Phase 1: masscan port sweep. Its open-ports-per-host IS the discovery --
+    # any host with an open port is found, so there is no separate liveness step
+    # that could miss a high-port-only host.
     masscan_output = stage_dir / "masscan_output.json"
-    alive_ips = _run_masscan(str(targets_file), str(masscan_output), config, logger)
+    ip_ports = _run_masscan(str(targets_file), str(masscan_output), config, logger)
 
-    if not alive_ips:
-        logger.warning("No alive hosts found")
-        return True
+    scan_cfg = config.get("port_scan", {})
+    cap = int(scan_cfg.get("max_open_ports_per_host", 500))
 
-    alive_file = stage_dir / "masscan_alive.txt"
-    write_lines(alive_file, alive_ips)
-    logger.info(f"Alive hosts: {len(alive_ips)}")
+    if ip_ports is not None:
+        if not ip_ports:
+            logger.warning("No hosts with open ports found")
+            return True
 
-    # Build nmap targets: one representative hostname per alive IP so nmap
-    # performs its own DNS lookup and records the name natively in its XML;
-    # fall back to the bare IP when an alive IP has no associated hostname
-    # (e.g. one discovered only via a CIDR range). The complete hostname list
-    # per IP is still carried in ip_hostname_map and merged into the report,
-    # so scanning one name per IP loses no association.
-    nmap_targets: list[str] = []
-    named = 0
-    for ip in alive_ips:
-        names = sorted(ip_to_hostnames.get(ip, []))
-        if names:
-            nmap_targets.append(names[0])
-            named += 1
-        else:
-            nmap_targets.append(ip)
+        # Hosts reporting an implausible number of open ports are almost always a
+        # firewall/LB/tarpit faking open; feeding thousands of ports to nmap -sV
+        # would hang. Record and skip them for the service scan.
+        filtered = {ip: p for ip, p in ip_ports.items() if len(p) > cap}
+        scannable = {ip: p for ip, p in ip_ports.items() if len(p) <= cap}
+        if filtered:
+            save_json(stage_dir / "filtered_hosts.json",
+                      {ip: len(p) for ip, p in sorted(filtered.items())})
+            logger.warning(
+                f"{len(filtered)} host(s) exceeded max_open_ports_per_host={cap} "
+                f"(likely filtered/all-open); skipped for service scan -- see "
+                f"filtered_hosts.json"
+            )
 
-    nmap_targets_file = stage_dir / "nmap_targets.txt"
-    write_lines(nmap_targets_file, nmap_targets)
-    logger.info(
-        f"nmap targets: {named} by hostname, {len(nmap_targets) - named} by IP"
-    )
+        save_json(stage_dir / "masscan_open_ports.json",
+                  dict(sorted(ip_ports.items())))
+        write_lines(stage_dir / "masscan_alive.txt", sorted(scannable.keys()))
 
-    # Phase 2: nmap service scan
-    success = _run_nmap(str(nmap_targets_file), stage_dir, config, logger)
+        # Group hosts by their exact open-port set, so each distinct set is one
+        # nmap job (the common {80,443} collapses to a single invocation) while
+        # each host is still probed only on the ports it actually has open. The
+        # representative hostname per IP lets nmap record the name natively; the
+        # full hostname list per IP stays in ip_hostname_map for the report.
+        groups: dict[tuple[int, ...], list[str]] = {}
+        named = 0
+        for ip, ports in scannable.items():
+            names = sorted(ip_to_hostnames.get(ip, []))
+            if names:
+                named += 1
+            groups.setdefault(tuple(ports), []).append(names[0] if names else ip)
+
+        jobs = [
+            (targets, ["-p", ",".join(str(p) for p in ports)])
+            for ports, targets in groups.items()
+        ]
+        logger.info(
+            f"Service-scanning {len(scannable)} host(s) in {len(jobs)} distinct "
+            f"port-set group(s); {named} scanned by hostname"
+        )
+        success = _run_nmap_jobs(jobs, stage_dir, config, logger, known_up=True)
+    else:
+        # Fallback: no masscan -> nmap does discovery + service itself. Much
+        # slower (full mode scans every port), host discovery left on to avoid
+        # fully scanning dead space. masscan is strongly recommended here.
+        mode = scan_cfg.get("scan_mode", "full")
+        port_args = (["--top-ports", str(scan_cfg.get("nmap_top_ports", 1000))]
+                     if mode == "top-ports" else ["-p-"])
+        logger.warning(
+            f"Falling back to a direct nmap scan without masscan (mode={mode}); "
+            f"this is slow. Install masscan / fix passwordless sudo for speed."
+        )
+        fb_targets = [sorted(ip_to_hostnames.get(ip, [ip]))[0] for ip in resolved_ips]
+        fb_targets += cidr_ranges
+        success = _run_nmap_jobs([(fb_targets, port_args)], stage_dir, config, logger,
+                                 known_up=False)
+
     if not success:
         return False
 

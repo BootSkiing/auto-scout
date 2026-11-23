@@ -105,17 +105,35 @@ subdomain_enum:
   timeout_minutes: 120
 
 port_scan:
-  masscan_rate: 10000
-  masscan_top_ports: 100
-  # Host-discovery timeout (seconds). masscan runtime grows with
-  # (#targets x #ports)/rate, so raise this for very large target sets.
-  masscan_timeout: 1800
+  # Scan depth. "full" = masscan every TCP port (-p1-65535): nothing on a high
+  # port is missed, but it runs for a long time at scale (days for tens of
+  # thousands of IPs). "top-ports" = masscan the top N ports only (fast).
+  scan_mode: full
+  # masscan send rate (packets/sec). Bandwidth is NOT the limit (~60-byte SYNs);
+  # on EC2 the real ceiling is the ENA pps allowance and security-group conntrack
+  # -- start lower and watch CloudWatch pps_allowance_exceeded, then tune up.
+  masscan_rate: 40000
+  # Resend probes to recover packets lost at high rate -> fewer false negatives.
+  # Total time is multiplied by (retries + 1).
+  masscan_retries: 1
+  # Only used when scan_mode is "top-ports".
+  masscan_top_ports: 1000
+  # masscan timeout (seconds). null = no timeout (needed for multi-day full
+  # scans). In top-ports mode it defaults to 1800 if unset.
+  masscan_timeout: null
+  # A host reporting more open ports than this is treated as filtered/all-open
+  # (firewall/LB/tarpit) and recorded but skipped for the nmap service scan,
+  # which would otherwise hang probing thousands of "open" ports.
+  max_open_ports_per_host: 500
+  # nmap service scan runs only on the ports masscan found open per host, so it
+  # can afford deeper version detection. -Pn is added automatically for hosts
+  # masscan already proved are up. (top-ports values below are only used in the
+  # no-masscan fallback.)
   nmap_top_ports: 1000
-  nmap_supplemental_ports: []
-  nmap_options: "-sV --open --version-intensity 2 --min-rate 1000"
+  nmap_options: "-sV --open --version-intensity 7"
   nmap_timing: "-T4"
   nmap_max_parallelism: 50
-  # Alive hosts are scanned in batches so one stuck batch can't kill the whole
+  # Service scan is sharded into batches so one stuck batch can't kill the whole
   # scan. nmap_timeout is the per-batch timeout (seconds); a batch that exceeds
   # it is skipped and the rest continue.
   nmap_batch_size: 1000
