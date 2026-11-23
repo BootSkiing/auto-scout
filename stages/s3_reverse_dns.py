@@ -20,6 +20,7 @@ from lib.review_gate import review_gate
 from lib.utils import (
     read_lines, write_lines, save_json, load_json,
     normalize_to_24, expand_cidr_to_ips, deduplicate_domains, filter_excluded,
+    clean_stage_dir,
 )
 from lib.scope import Scope
 
@@ -171,6 +172,10 @@ def run(run_dir: Path, config: dict) -> bool:
     if approved_file.exists():
         logger.info("Reverse DNS already completed (approved file exists)")
         return True
+
+    # Clear regenerated outputs from a prior run; progress.json (resume state)
+    # and any approved file are preserved by clean_stage_dir.
+    clean_stage_dir(stage_dir, logger=logger)
 
     # Load IP ranges from stage 2
     ip_ranges_file = run_dir / "s2_asn" / "ip_ranges.txt"

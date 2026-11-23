@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import load_config, get_run_dir, get_stage_dir
 from lib.logging_setup import setup_logging
-from lib.utils import read_lines, write_lines, run_command, load_json
+from lib.utils import read_lines, write_lines, run_command, load_json, clean_stage_dir
 
 
 def _is_web_service(service_elem, portid: int, fallback_ports: list[int]) -> bool:
@@ -92,6 +92,9 @@ def run(run_dir: Path, config: dict) -> bool:
     if db_file.exists():
         logger.info("Web analysis already completed (gowitness database exists)")
         return True
+
+    # Clear regenerated outputs (old screenshots/, targets, partial db) before rerun.
+    clean_stage_dir(stage_dir, logger=logger)
 
     nmap_xml = run_dir / "s7_portscan" / "nmap_results.xml"
     if not nmap_xml.exists():

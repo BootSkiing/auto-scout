@@ -18,6 +18,7 @@ from lib.review_gate import review_gate
 from lib.utils import (
     read_lines, write_lines, save_json, load_json,
     deduplicate_domains, filter_excluded,
+    clean_stage_dir,
 )
 from lib.scope import Scope
 
@@ -97,6 +98,9 @@ def run(run_dir: Path, config: dict) -> bool:
     if approved_file.exists():
         logger.info("Reverse WHOIS already completed (approved file exists)")
         return True
+
+    # Clear regenerated outputs from a prior run (approved file preserved).
+    clean_stage_dir(stage_dir, logger=logger)
 
     rwhois_config = config.get("reverse_whois", {})
     api_key = config.get("api_keys", {}).get("whoxy", "")

@@ -17,6 +17,7 @@ from lib.logging_setup import setup_logging
 from lib.utils import (
     read_lines, write_lines, save_json,
     deduplicate_domains, filter_excluded,
+    clean_stage_dir,
 )
 from lib.scope import Scope
 
@@ -68,6 +69,9 @@ def run(run_dir: Path, config: dict) -> bool:
         if existing:
             logger.info(f"Cleanup already completed ({len(existing)} domains in {final_file.name})")
             return True
+
+    # Clear regenerated outputs from a prior run before rebuilding.
+    clean_stage_dir(stage_dir, logger=logger)
 
     # Collect domains from all sources
     sources = {}

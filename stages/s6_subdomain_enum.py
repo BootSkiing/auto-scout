@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import load_config, get_run_dir, get_stage_dir
 from lib.logging_setup import setup_logging
-from lib.utils import read_lines, write_lines, deduplicate_domains, run_command
+from lib.utils import read_lines, write_lines, deduplicate_domains, run_command, clean_stage_dir
 from lib.scope import Scope
 
 
@@ -133,6 +133,9 @@ def run(run_dir: Path, config: dict) -> bool:
         if existing:
             logger.info(f"Subdomain enum already completed ({len(existing)} subdomains)")
             return True
+
+    # Clear regenerated outputs (including a stale bbot_output/ dir) before rerun.
+    clean_stage_dir(stage_dir, logger=logger)
 
     # Check bbot is available
     result = run_command(["bbot", "--version"], logger=logger)

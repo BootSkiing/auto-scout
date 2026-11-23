@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.config import load_config, validate_seeds, validate_api_keys, get_run_dir
 from lib.logging_setup import setup_logging
+from lib.utils import wipe_stage_dir
 
 
 STAGE_ORDER = [
@@ -60,6 +61,10 @@ def parse_args():
                         choices=STAGE_NAMES, help="Run stages up through this one")
     parser.add_argument("--review-mode", dest="review_mode", default=None,
                         choices=["halt", "auto"], help="Override review gate behavior")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-run even completed stages, wiping each stage's dir "
+                             "first (approved files and resume progress included) for a "
+                             "clean-slate run")
     parser.add_argument("--rdns-mode", dest="rdns_mode", default="api",
                         choices=["api", "bulk"],
                         help="s3 reverse-DNS backend: 'api' (per-IP THC API, default) "
@@ -167,15 +172,18 @@ def main():
     for stage_name, module_path in stages_to_run:
         stage_status = state["stages"].get(stage_name, {}).get("status", "not_started")
 
-        if stage_status == "completed" and not args.only:
+        if stage_status == "completed" and not args.only and not args.force:
             logger.info(f"Skipping {stage_name} (already completed)")
             continue
 
-        if stage_status == "review_needed":
+        if stage_status == "review_needed" and not args.force:
             if not check_review_resumed(stage_name, state, run_dir):
                 logger.info(f"Stage {stage_name} is waiting for review -- halting")
                 logger.info(f"Review file: {state['stages'][stage_name].get('review_file', '?')}")
                 break
+
+        if args.force:
+            wipe_stage_dir(run_dir / stage_name, logger)
 
         logger.info("=" * 60)
         logger.info(f"Starting stage: {stage_name}")

@@ -2,12 +2,80 @@ import ipaddress
 import json
 import logging
 import re
+import shutil
 import subprocess
 import time
 from functools import wraps
 from pathlib import Path
 
 import requests
+
+
+# Files inside a stage dir that auto-clean must never delete on a normal re-run:
+# human-approved review outputs (*_approved.*) and long-running resume state
+# (progress.json). A --force run bypasses this and wipes everything.
+PRESERVED_ON_AUTOCLEAN = ("*_approved.*", "progress.json")
+
+
+def _remove_path(p: Path, logger: logging.Logger = None) -> int:
+    try:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+        return 1
+    except OSError as e:
+        if logger:
+            logger.warning(f"Could not remove {p}: {e}")
+        return 0
+
+
+def clean_stage_dir(
+    stage_dir: str | Path,
+    preserve: tuple[str, ...] = PRESERVED_ON_AUTOCLEAN,
+    logger: logging.Logger = None,
+) -> int:
+    """Remove a stage's regenerated outputs before it redoes its work.
+
+    Deletes every entry directly in stage_dir except those matching a preserve
+    glob (approved review outputs and resume state). This keeps a re-run from
+    merging stale artifacts (e.g. nmap batch XML left from a larger previous
+    run) while never discarding human approvals or expensive progress. Call it
+    on the work path only -- after a stage's "already completed" short-circuit,
+    so completed stages still resume instead of rebuilding. Returns the count
+    removed.
+    """
+    stage_dir = Path(stage_dir)
+    if not stage_dir.exists():
+        return 0
+    preserved: set[Path] = set()
+    for pattern in preserve:
+        preserved.update(stage_dir.glob(pattern))
+    removed = 0
+    for entry in stage_dir.iterdir():
+        if entry in preserved:
+            continue
+        removed += _remove_path(entry, logger)
+    if removed and logger:
+        logger.info(f"Cleaned {removed} regenerated output(s) from {stage_dir.name}/")
+    return removed
+
+
+def wipe_stage_dir(stage_dir: str | Path, logger: logging.Logger = None) -> int:
+    """Delete everything inside a stage dir -- approvals and progress included.
+
+    This is the --force clean slate; prefer clean_stage_dir for ordinary
+    re-runs. Returns the count removed.
+    """
+    stage_dir = Path(stage_dir)
+    if not stage_dir.exists():
+        return 0
+    removed = 0
+    for entry in stage_dir.iterdir():
+        removed += _remove_path(entry, logger)
+    if logger:
+        logger.info(f"Force-cleaned {stage_dir.name}/ ({removed} entries removed)")
+    return removed
 
 
 def read_lines(filepath: str | Path) -> list[str]:

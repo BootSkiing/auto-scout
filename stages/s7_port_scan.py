@@ -25,6 +25,7 @@ from lib.utils import (
     deduplicate_domains,
     save_json,
     has_underscore_label,
+    clean_stage_dir,
 )
 
 
@@ -432,9 +433,11 @@ def run(run_dir: Path, config: dict) -> bool:
     stage_dir = get_stage_dir(run_dir, "s7_portscan")
 
     xlsx_file = stage_dir / "port_scan_results.xlsx"
-    if xlsx_file.exists():
-        logger.info("Port scan already completed (Excel report exists)")
-        return True
+
+    # Port scanning has no human-review gate; whenever this stage is invoked it
+    # re-scans. Clear regenerated artifacts first so stale batch/scan files from
+    # a previous (possibly larger) run can't be merged into the new report.
+    clean_stage_dir(stage_dir, logger=logger)
 
     # Gather targets: subdomains + IP ranges
     subdomains_file = run_dir / "s6_subdomains" / "subdomains.txt"

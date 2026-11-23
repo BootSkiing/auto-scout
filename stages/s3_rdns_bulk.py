@@ -48,6 +48,7 @@ from lib.review_gate import review_gate
 from lib.utils import (
     read_lines, normalize_to_24, expand_cidr_to_ips,
     deduplicate_domains, filter_excluded, save_json,
+    clean_stage_dir,
 )
 from lib.scope import Scope
 
@@ -152,6 +153,9 @@ def run(run_dir: Path, config: dict, parquet_override: str | None = None) -> boo
     if approved_file.exists():
         logger.info("Reverse DNS already completed (approved file exists)")
         return True
+
+    # Clear regenerated outputs from a prior run (approved/progress preserved).
+    clean_stage_dir(stage_dir, logger=logger)
 
     parquet = parquet_override or bulk_cfg.get("parquet_path", "")
     if not parquet:

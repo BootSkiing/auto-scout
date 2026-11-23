@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import load_config, get_run_dir, get_stage_dir, resolve_seed_path, PROJECT_ROOT
 from lib.logging_setup import setup_logging
 from lib.review_gate import review_gate
-from lib.utils import read_lines, write_lines, save_json, load_json
+from lib.utils import read_lines, write_lines, save_json, load_json, clean_stage_dir
 from lib.scope import Scope
 
 
@@ -126,6 +126,10 @@ def run(run_dir: Path, config: dict) -> bool:
     if approved_file.exists():
         logger.info("Found approved file, extracting IP ranges...")
         return _extract_and_write_ranges(approved_file, ip_dat_path, cache_dir, asn_config, stage_dir, logger)
+
+    # Fresh discovery: clear regenerated outputs from a prior run (the ASN
+    # dataset cache lives under .cache/, not here, so it is untouched).
+    clean_stage_dir(stage_dir, logger=logger)
 
     # Download datasets
     asn_json_url = asn_config.get("asn_json_url", "https://asndb.network/get/latest/asn.json")
