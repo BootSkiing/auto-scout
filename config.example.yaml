@@ -76,16 +76,33 @@ cleanup:
     - "domain parking"
     - "this webpage is parked"
     - "sedo.com"
+  # Shared CDN / DNS-edge / infra domains to drop -- these are never the target's
+  # own scannable assets. NOTE: cloud *hosting* (e.g. *.amazonaws.com S3/ELB,
+  # *.azurewebsites.net, *.herokuapp.com) is deliberately NOT excluded, because a
+  # target's own assets live there.
   excluded_domain_patterns:
+    # Akamai (CDN + GTM/DNS edge)
     - '\.akamai\.net$'
     - '\.akamaiedge\.net$'
     - '\.akamaitechnologies\.com$'
+    - '\.edgekey\.net$'
+    - '\.edgesuite\.net$'
+    - '\.akamaihd\.net$'
+    - '\.akadns\.net$'
+    # AWS / Azure / Google edge (CDN + DNS load balancing; NOT their hosting)
     - '\.cloudfront\.net$'
-    - '\.amazonaws\.com$'
+    - '\.azureedge\.net$'
     - '\.azure-dns\.com$'
-    - '\.azurewebsites\.net$'
     - '\.trafficmanager\.net$'
     - '\.googleusercontent\.com$'
+    - '\.1e100\.net$'
+    # Other CDN / WAF edge providers
+    - '\.fastly\.net$'
+    - '\.fastlylb\.net$'
+    - '\.cloudflare\.net$'
+    - '\.edgecastcdn\.net$'
+    - '\.incapdns\.net$'
+    - '\.llnwd\.net$'
   parking_check_timeout: 5
   parking_check_threads: 20
 
