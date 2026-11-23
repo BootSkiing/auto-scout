@@ -116,6 +116,13 @@ port_scan:
   # Resend probes to recover packets lost at high rate -> fewer false negatives.
   # Total time is multiplied by (retries + 1).
   masscan_retries: 1
+  # Optional fixed masscan source port. Leave null to let masscan choose. If set,
+  # add a firewall rule dropping inbound traffic to this port so the kernel never
+  # RSTs masscan's SYN-ACKs (masscan still captures them via pcap), e.g.:
+  #   sudo iptables -A INPUT -p tcp --dport 61000 -j DROP
+  # 61000 is recommended: it is above the Linux ephemeral range (32768-60999),
+  # so the kernel won't assign it to another connection.
+  masscan_source_port: null
   # Only used when scan_mode is "top-ports".
   masscan_top_ports: 1000
   # masscan timeout (seconds). null = no timeout (needed for multi-day full

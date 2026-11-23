@@ -178,6 +178,11 @@ def _run_masscan(targets_file: str, output_file: str, config: dict, logger) -> "
     rate = scan_config.get("masscan_rate", 40000)
     retries = scan_config.get("masscan_retries", 1)
     mode = scan_config.get("scan_mode", "full")
+    # Optional fixed source port. When set, pair it with a firewall rule that
+    # drops inbound traffic to this port so the kernel never sees masscan's
+    # SYN-ACKs and never answers them with a RST (masscan captures them via pcap
+    # regardless). Leave unset to let masscan pick its own port.
+    source_port = scan_config.get("masscan_source_port")
     # A full scan runs for days -- default to no timeout there; top-ports keeps a
     # bound. masscan_timeout in config overrides either (null = no timeout).
     default_timeout = None if mode == "full" else 1800
@@ -197,9 +202,12 @@ def _run_masscan(targets_file: str, output_file: str, config: dict, logger) -> "
         "-oJ", output_file,
         "--open",
     ]
+    if source_port:
+        cmd.append(f"--source-port={source_port}")
 
     logger.info(
         f"Running masscan (mode={mode}/{label}, rate={rate}, retries={retries}, "
+        f"source-port={source_port or 'auto'}, "
         f"timeout={'none' if timeout is None else str(timeout) + 's'})..."
     )
     result = run_command(cmd, timeout=timeout, logger=logger)
