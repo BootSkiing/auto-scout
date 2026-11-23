@@ -107,11 +107,19 @@ subdomain_enum:
 port_scan:
   masscan_rate: 10000
   masscan_top_ports: 100
+  # Host-discovery timeout (seconds). masscan runtime grows with
+  # (#targets x #ports)/rate, so raise this for very large target sets.
+  masscan_timeout: 1800
   nmap_top_ports: 1000
   nmap_supplemental_ports: []
   nmap_options: "-sV --open --version-intensity 2 --min-rate 1000"
   nmap_timing: "-T4"
   nmap_max_parallelism: 50
+  # Alive hosts are scanned in batches so one stuck batch can't kill the whole
+  # scan. nmap_timeout is the per-batch timeout (seconds); a batch that exceeds
+  # it is skipped and the rest continue.
+  nmap_batch_size: 1000
+  nmap_timeout: 3600
 
 web_analysis:
   # Fallback ports: only used when nmap couldn't fingerprint the service.

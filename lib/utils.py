@@ -55,6 +55,20 @@ def deduplicate_domains(domains: list[str]) -> list[str]:
     return result
 
 
+def has_underscore_label(hostname: str) -> bool:
+    """True if any dot-separated label of the hostname starts with '_'.
+
+    Underscore-prefixed labels (RFC 8552) carry service metadata, not hosts:
+    _dmarc, _domainkey, _acme-challenge, _mta-sts, and SRV names like
+    _sip._tcp all resolve to TXT/SRV records rather than to an address. The
+    token "_wildcard" is also how some certificate-transparency tooling renders
+    the "*" of a wildcard certificate (*.example.com -> _wildcard.example.com).
+    None of these are valid port-scan targets, so they should be filtered out
+    before the resolution gate in stage 7.
+    """
+    return any(label.startswith("_") for label in hostname.split("."))
+
+
 def normalize_asn(value: str) -> str:
     """Normalize an ASN string to its bare numeric form.
 
@@ -105,13 +119,31 @@ def run_command(
 ) -> subprocess.CompletedProcess:
     if logger:
         logger.debug(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=cwd,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired as e:
+        # Never let a timeout propagate and abort the whole pipeline. Return a
+        # synthetic non-zero result so callers' returncode checks handle it,
+        # preserving any partial stdout captured before the kill.
+        msg = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        if logger:
+            logger.error(msg)
+        partial = e.stdout
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors="replace")
+        return subprocess.CompletedProcess(cmd, 124, partial or "", msg)
+    except FileNotFoundError:
+        # Missing binary: treat as a failed command, not a crash.
+        msg = f"Command not found: {cmd[0]}"
+        if logger:
+            logger.error(msg)
+        return subprocess.CompletedProcess(cmd, 127, "", msg)
     if logger and result.returncode != 0:
         logger.error(f"Command failed (exit {result.returncode}): {' '.join(cmd)}")
         if result.stderr:
