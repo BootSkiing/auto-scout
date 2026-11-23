@@ -113,16 +113,24 @@ review:
 
 ```yaml
 port_scan:
-  masscan_rate: 10000              # Packets/sec for masscan
-  masscan_top_ports: 100           # Ports to check during alive-host discovery
-  nmap_top_ports: 1000             # Ports for nmap service scan
-  nmap_supplemental_ports: []      # Extra ports to always scan, e.g. [8444, 9090, 2222]
-  nmap_options: "-sV --open --version-intensity 2 --min-rate 1000"
+  scan_mode: full                  # "full" = all 65535 TCP ports; "top-ports" = top N only (fast)
+  masscan_rate: 40000              # Packets/sec. Bandwidth is not the limit; on EC2 watch the ENA pps allowance
+  masscan_retries: 1               # Re-send probes to recover packet loss (fewer false negatives); time x (retries+1)
+  masscan_source_port: null        # Optional fixed source port (pair with a firewall RST-drop rule); null = auto
+  masscan_top_ports: 1000          # Only used when scan_mode: top-ports
+  masscan_timeout: null            # Seconds; null = no timeout (needed for multi-day full scans)
+  max_open_ports_per_host: 500     # Hosts above this are treated as filtered/all-open and skipped for service scan
+  nmap_top_ports: 1000             # Only used in the no-masscan fallback
+  nmap_options: "-sV --open --version-intensity 7"
   nmap_timing: "-T4"
   nmap_max_parallelism: 50
+  nmap_batch_size: 1000            # Service scan is sharded; a stuck batch is skipped and the rest continue
+  nmap_timeout: 3600               # Per-batch nmap timeout (seconds)
 ```
 
-`nmap_supplemental_ports` lets you add specific ports of interest without scanning all 65,535. These are scanned in addition to the top-N ports.
+In **full** mode masscan sweeps every TCP port, so services on uncommon high ports are not missed; nmap then does version detection **only on the ports masscan found open** per host (grouped by port-set so common sets collapse into one invocation). A full scan of tens of thousands of IPs runs for hours to days — that is expected, and `masscan_timeout: null` keeps it from being killed. Use **top-ports** mode for a fast pass.
+
+masscan requires root; the pipeline runs it as `sudo -n masscan`, so configure passwordless sudo for the masscan binary or the stage falls back to a much slower direct nmap scan. Bandwidth is never the bottleneck for SYN scanning (tens of Mbps even at high rates) — on EC2 the real limits are the ENA packets-per-second and security-group connection-tracking allowances, so start the rate conservatively and watch the ENA CloudWatch counters. See the inline comments in `config.example.yaml` for details.
 
 ### Exclusion Patterns
 
@@ -130,9 +138,10 @@ port_scan:
 cleanup:
   excluded_domain_patterns:
     - '\.akamai\.net$'
+    - '\.edgekey\.net$'
+    - '\.fastly\.net$'
     - '\.cloudfront\.net$'
-    - '\.amazonaws\.com$'
-    # Add patterns here for domains that should always be removed
+    # Shared CDN / DNS-edge / WAF infra — see config.example.yaml for the full list
   parking_indicators:
     - "parked free"
     - "godaddy"
@@ -140,7 +149,9 @@ cleanup:
     # Strings in HTTP response bodies that indicate a parked domain
 ```
 
-These are applied automatically during stage 5 (cleanup). Domains matching `excluded_domain_patterns` (regex) are removed. Domains whose HTTP response contains any `parking_indicators` string are flagged as parked and removed.
+These are applied automatically during stages 3, 4, and 5. Domains matching `excluded_domain_patterns` (regex, case-insensitive) are removed. Domains whose HTTP response contains any `parking_indicators` string are flagged as parked and removed in stage 5.
+
+The pattern list targets **shared CDN / DNS-edge / WAF infrastructure** (Akamai, Fastly, CloudFront, Cloudflare, Azure CDN/DNS, etc.) — never the target's own scannable assets. Cloud *hosting* (`*.amazonaws.com` S3/ELB/EC2, `*.azurewebsites.net`, and similar) is intentionally **not** excluded, because a target's own assets live there. The shipped list in `config.example.yaml` documents this split.
 
 #### Out-of-scope lists
 
@@ -152,7 +163,7 @@ The `seeds/out_of_scope_*.txt` files (see [Seed Files](#seed-files)) are the sco
 | `out_of_scope_terms.txt` | Exact, case-insensitive term. Drops corporation terms (s2 ASN search) and whois names/orgs/emails (s4). | s2, s4 |
 | `out_of_scope_asns.txt` | Normalized ASN (`AS1234` = `1234`). | s2 |
 
-For regex-based junk filtering (CDNs, cloud hostnames), use `cleanup.excluded_domain_patterns` instead — that is a separate feature from the scope lists.
+For regex-based junk filtering (shared CDN / DNS-edge infra), use `cleanup.excluded_domain_patterns` instead — that is a separate feature from the scope lists.
 
 ### Reverse DNS (Stage 3)
 
@@ -370,6 +381,9 @@ Options:
   --review-mode MODE     "halt" (default) or "auto"
   --rdns-mode MODE       Stage 3 backend: "api" (default, per-IP ip.thc.org)
                          or "bulk" (local DuckDB query over THC's snapshot)
+  --force                Re-run even completed stages, wiping each stage's
+                         directory first (approved files and resume progress
+                         included) for a clean-slate run
 
 Stage names:
   s1_seeds        Validate and snapshot seed files
@@ -428,12 +442,14 @@ Runs bbot in passive-only mode against every domain in `domains_final.txt`. Proc
 
 ### Stage 7: Port Scanning (`s7_portscan`)
 
-1. Resolves all subdomains and domains to IPs, combines with ASN IP ranges
-2. **masscan** — scans top 100 ports to identify alive hosts (requires sudo; falls back to nmap ping scan if unavailable)
-3. **nmap** — runs a service scan (`-sV`, configurable) against alive hosts on top 1000 ports + any supplemental ports
-4. Converts nmap XML to an Excel workbook with three sheets: Hosts, Services, and Summary
+1. **Resolution gate** — filters out non-host labels (underscore/service records like `_dmarc` and `_acme-challenge`, and the `_wildcard` certificate-transparency artifact), resolves the remaining subdomains/domains to IPs (parallel `dig`), and combines them with the ASN CIDR ranges from stage 2. Filtered and unresolved names are recorded to `resolution_gate.json`.
+2. **masscan** — sweeps ports across all target IPs (all 65,535 in `full` mode, top-N in `top-ports` mode; requires passwordless sudo). Its open-ports-per-host results *are* the discovery, so a host with only a high port open is not missed, and partial output from an interrupted scan is salvaged.
+3. **nmap** — service/version scan (`-sV`) run **per host on exactly the ports masscan found open**, grouped by port-set and sharded into batches. Hosts reporting more open ports than `max_open_ports_per_host` (likely firewall/LB/tarpit) are recorded to `filtered_hosts.json` and skipped. Each IP is scanned via one representative hostname so nmap records the name natively; the complete hostname list per IP is preserved in `ip_hostname_map.json` for the report and stage 8.
+4. Merges the per-batch nmap XML and converts it to an Excel workbook with three sheets: Hosts, Services, and Summary.
 
-**Output** — `nmap_results.xml`, `nmap_results.gnmap`, `port_scan_results.xlsx`
+Re-running the stage always re-scans (there is no "already done" short-circuit) and clears stale artifacts first. If masscan is unavailable it falls back to a slower direct nmap scan.
+
+**Output** — `resolution_gate.json`, `ip_hostname_map.json`, `masscan_open_ports.json`, `masscan_alive.txt`, `filtered_hosts.json`, `nmap_results.xml`, `port_scan_results.xlsx`
 
 ### Stage 8: Web Analysis (`s8_web`)
 
@@ -483,10 +499,14 @@ runs/2026-10-29/
 │   ├── subdomains.txt
 │   └── subdomains_by_domain.json
 ├── s7_portscan/
+│   ├── resolution_gate.json
+│   ├── ip_hostname_map.json
 │   ├── scan_targets.txt
+│   ├── masscan_output.json
+│   ├── masscan_open_ports.json
 │   ├── masscan_alive.txt
+│   ├── filtered_hosts.json
 │   ├── nmap_results.xml
-│   ├── nmap_results.gnmap
 │   └── port_scan_results.xlsx
 ├── s8_web/
 │   ├── web_targets.txt
@@ -497,7 +517,7 @@ runs/2026-10-29/
     └── dorks.txt
 ```
 
-`state.json` tracks which stages have completed, so re-running the pipeline skips finished work and resumes from where it left off.
+`state.json` tracks which stages have completed, so re-running the pipeline skips finished work and resumes from where it left off. When a stage does re-run, it clears its own stale/regenerated outputs first while preserving approved review files and resume progress; `--force` re-runs even completed stages and wipes each stage directory entirely for a clean slate.
 
 ## Typical Workflow
 
@@ -545,7 +565,7 @@ If you need to run scans from a non-residential IP (recommended), you have two o
 
 ## Notes
 
-- **masscan requires root** for raw socket access. The pipeline will prompt for sudo or fall back to an nmap ping scan if sudo is unavailable.
+- **masscan requires root** for raw socket access. The pipeline runs it non-interactively as `sudo -n masscan`, so set up passwordless sudo for the masscan binary; if it is unavailable the stage falls back to a slower direct nmap scan. Full-port scans are long-running — see [Port Scan Tuning](#port-scan-tuning) for the scan modes and the EC2 (ENA pps / security-group conntrack) considerations.
 - **Large IP ranges** (e.g., a /16 with 65K IPs) can take many hours in stage 3 due to ip.thc.org rate limits. The stage saves progress checkpoints and resumes where it left off if interrupted.
 - **Whoxy API credits** are logged before and after stage 4. The `micro` mode uses the fewest credits per query. Monitor your balance at [whoxy.com](https://www.whoxy.com/).
 - The asndb.network datasets are cached locally in `.cache/asndb/` and re-downloaded only if older than 24 hours.
